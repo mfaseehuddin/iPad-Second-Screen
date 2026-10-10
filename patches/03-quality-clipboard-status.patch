@@ -1,0 +1,138 @@
+Modification of OpenDisplay (https://github.com/peetzweg/opendisplay),
+Copyright (c) 2026 Philip Poloczek, licensed under GPL-3.0 (see Mac/LICENSE).
+Modified 2026-10-11 for iPad-Second-Screen. This patch is likewise GPL-3.0.
+
+Quality chosen in hello, two-way clipboard sync, and Mac battery/power
+status for receivers that opt in with a `subscribe` message.
+
+diff --git a/Mac/MacSender.swift b/Mac/MacSender.swift
+index 7bd89f1..114019e 100644
+--- a/Mac/MacSender.swift
++++ b/Mac/MacSender.swift
+@@ -14,6 +14,7 @@
+ //   e.g. {"type":"hello","pixelsWide":2556,"pixelsHigh":1179,"scale":3}
+ 
+ import ScreenCaptureKit
++import IOKit.ps
+ import VideoToolbox
+ import Network
+ import CoreMedia
+@@ -75,6 +76,8 @@ struct PhoneInfo: Decodable {
+                           // every pre-handshake install → treat as protocol 1
+     let mode: String?     // "mirror" / "extend" chosen on the device; absent →
+                           // the Mac's own Mode picker decides
++    let quality: String?  // StreamQuality raw value chosen on the device; absent →
++                          // the Mac's own Quality picker decides
+ 
+     var kind: String { device ?? "device" }
+     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
+@@ -127,7 +130,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+     private let endpointName: String
+     // The Mac's Mode picker, unless the receiver's hello asks for another.
+     private var mode: CaptureMode
+-    private let quality: StreamQuality
++    // The Mac's Quality picker, unless the receiver's hello asks for another.
++    private var quality: StreamQuality
+     // Stable per-device serial for the virtual display, so macOS can tell
+     // multiple OpenDisplay monitors apart and persist their arrangement.
+     private let displaySerial: UInt32
+@@ -285,6 +289,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+         }
+         let info = try await waitForHello()
+         if let requested = info.requestedMode { mode = requested }
++        if let requested = info.quality.flatMap(StreamQuality.init(rawValue:)) { quality = requested }
+ 
+         switch mode {
+         case .mirror:
+@@ -1045,6 +1050,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             // without the silence grace and without waiting for a wake.
+             Log.info("receiver app closed — ending session")
+             Task { @MainActor in self.onPeerClosed?() }
++        case "subscribe":
++            // The receiver opts in to clipboard sync and/or Mac status.
++            clipboardSync = obj["clipboard"] as? Bool ?? false
++            statusSubscribed = obj["status"] as? Bool ?? false
++            if !extrasStarted {
++                extrasStarted = true
++                scheduleExtras()
++            }
++        case "clipboard":
++            if let text = obj["text"] as? String, clipboardSync {
++                lastClipboard = text
++                DispatchQueue.main.async {
++                    NSPasteboard.general.clearContents()
++                    NSPasteboard.general.setString(text, forType: .string)
++                }
++            }
+         case WireMessage.standby:
+             Log.info("receiver went to standby — ending session, redialing for its next request")
+             Task { @MainActor in self.onPeerStandby?() }
+@@ -1053,6 +1074,68 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+         }
+     }
+ 
++    // MARK: - Clipboard sync and Mac status (receiver subscriptions)
++
++    // Queue-confined.
++    private var clipboardSync = false
++    private var statusSubscribed = false
++    private var extrasStarted = false
++    private var lastClipboard: String?
++    private var clipboardChangeCount = -1
++
++    private func scheduleExtras(tick: Int = 0) {
++        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
++            guard let self, !self.stopped else { return }
++            if self.clipboardSync { self.pollClipboard() }
++            if self.statusSubscribed, tick % 15 == 0 { self.sendMacStatus() }
++            self.scheduleExtras(tick: tick + 1)
++        }
++    }
++
++    /// Sends Mac clipboard text that changed since the last poll. What was
++    /// on the clipboard before sync started stays on the Mac.
++    private func pollClipboard() {
++        DispatchQueue.main.async { [weak self] in
++            let count = NSPasteboard.general.changeCount
++            let text = NSPasteboard.general.string(forType: .string)
++            self?.queue.async {
++                guard let self, count != self.clipboardChangeCount else { return }
++                let firstPoll = self.clipboardChangeCount == -1
++                self.clipboardChangeCount = count
++                // Receivers parse control messages under 32 KB.
++                guard !firstPoll, let text, text != self.lastClipboard, text.utf8.count <= 16_000 else { return }
++                self.lastClipboard = text
++                self.sendJSON(["type": "clipboard", "text": text])
++            }
++        }
++    }
++
++    /// Battery level and power source, for the receiver's status bar.
++    private func sendMacStatus() {
++        var message: [String: Any] = ["type": "macStatus"]
++        if let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
++           let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] {
++            for source in sources {
++                guard let description = IOPSGetPowerSourceDescription(info, source)?
++                        .takeUnretainedValue() as? [String: Any],
++                      description[kIOPSTypeKey] as? String == kIOPSInternalBatteryType else { continue }
++                if let current = description[kIOPSCurrentCapacityKey] as? Int,
++                   let maximum = description[kIOPSMaxCapacityKey] as? Int, maximum > 0 {
++                    message["battery"] = current * 100 / maximum
++                }
++                message["charging"] = description[kIOPSIsChargingKey] as? Bool ?? false
++                message["onAC"] = description[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
++            }
++        }
++        sendJSON(message)
++    }
++
++    private func sendJSON(_ object: [String: Any]) {
++        guard let data = try? JSONSerialization.data(withJSONObject: object),
++              let json = String(data: data, encoding: .utf8) else { return }
++        sendJSONFrame(json)
++    }
++
+     private func waitForHello() async throws -> PhoneInfo {
+         if let lastHello { return lastHello }
+         return try await withCheckedThrowingContinuation { continuation in

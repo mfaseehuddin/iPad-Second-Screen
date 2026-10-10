@@ -14,8 +14,12 @@ final class VideoContainerView: UIView {
 
 final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIGestureRecognizerDelegate {
 
+    // The video sits in a clipping container so pinch-zoom can scale it
+    // without spilling over the docked overlay.
+    private let videoClip = UIView()
     private let videoView = VideoContainerView()
     private let statusLabel = UILabel()
+    private let statusBar = UILabel()
     private let homeView = HomeView()
     private let controls = ControlsOverlay()
     private let inputOverlay = InputOverlay()
@@ -28,6 +32,26 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // stays up until the first frame of that mode arrives.
     private var activeMode: DisplayMode?
     private var receivingVideo = false
+
+    // Local zoom (iPad only): scale, and the point of the picture kept at
+    // the center of the screen, normalized to videoView's bounds.
+    private var zoomScale: CGFloat = 1
+    private var zoomFocus = CGPoint(x: 0.5, y: 0.5)
+    private var pinchStartScale: CGFloat = 1
+
+    // Clipboard sync: the iPad side polls its pasteboard while streaming.
+    private var clipboardTimer: Timer?
+    private var lastPasteboardCount = UIPasteboard.general.changeCount
+    private var lastClipboardFromMac: String?
+
+    // Status bar contents.
+    private var macBattery: Int?
+    private var macCharging = false
+    private var statsText = ""
+
+    // Settings that need more than a relayout when they change.
+    private var appliedQuality = AppSettings.shared.quality
+    private var appliedDisplaySize = AppSettings.shared.displaySize
     private var link: ReceiverLink?
 
     // Cursor sprite: positioned/sized in normalized [0,1] Mac-display space,
@@ -62,9 +86,21 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         super.viewDidLoad()
         view.backgroundColor = .black
 
-        videoView.frame = view.bounds
-        view.addSubview(videoView)
+        videoClip.clipsToBounds = true
+        videoClip.frame = view.bounds
+        view.addSubview(videoClip)
+        videoView.frame = videoClip.bounds
+        videoClip.addSubview(videoView)
         videoView.layer.addSublayer(cursorLayer)
+
+        statusBar.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        statusBar.textColor = UIColor(white: 1, alpha: 0.85)
+        statusBar.backgroundColor = UIColor(white: 0, alpha: 0.45)
+        statusBar.textAlignment = .center
+        statusBar.layer.cornerRadius = 8
+        statusBar.clipsToBounds = true
+        statusBar.isHidden = true
+        view.addSubview(statusBar)
 
         statusLabel.textColor = .white
         statusLabel.font = .systemFont(ofSize: 14, weight: .medium)
@@ -94,6 +130,20 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
 
         receiver = VideoReceiver(displayLayer: videoView.displayLayer)
         receiver.delegate = self
+        let settings = AppSettings.shared
+        receiver.setQuality(settings.quality.rawValue)
+        receiver.subscribe(clipboard: settings.syncClipboard, status: settings.showStatusBar)
+        if settings.autoStart, let mode = settings.lastMode { choose(mode) }
+
+        // Pinch the picture to zoom (iPad only); two-finger double-tap resets.
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        pinch.delegate = self
+        view.addGestureRecognizer(pinch)
+        let resetZoom = UITapGestureRecognizer(target: self, action: #selector(resetZoomTapped))
+        resetZoom.numberOfTouchesRequired = 2
+        resetZoom.numberOfTapsRequired = 2
+        resetZoom.delegate = self
+        view.addGestureRecognizer(resetZoom)
 
         UIApplication.shared.isIdleTimerDisabled = true
 
@@ -141,6 +191,18 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     }
 
     @objc private func settingsChanged() {
+        let settings = AppSettings.shared
+        if settings.quality != appliedQuality {
+            appliedQuality = settings.quality
+            receiver.setQuality(settings.quality.rawValue)
+            receiver.restartStream()
+        }
+        if settings.displaySize != appliedDisplaySize {
+            appliedDisplaySize = settings.displaySize
+            announcePanel()
+        }
+        receiver.subscribe(clipboard: settings.syncClipboard, status: settings.showStatusBar)
+        if !settings.pinchToZoom { setZoom(1, animated: false) }
         inputOverlay.applySettings()
         UIViewController.attemptRotationToDeviceOrientation()
         announcePanel()
@@ -175,12 +237,12 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         if docked {
             let aspect = lastVideoSize.width > 0 ? lastVideoSize.height / lastVideoSize.width
                                                  : safe.width / safe.height
-            videoView.frame = CGRect(x: 0, y: safe.minY, width: view.bounds.width,
-                                     height: (view.bounds.width * aspect).rounded())
-            let top = videoView.frame.maxY + 6
+            setVideoFrame(CGRect(x: 0, y: safe.minY, width: view.bounds.width,
+                                 height: (view.bounds.width * aspect).rounded()))
+            let top = videoClip.frame.maxY + 6
             inputOverlay.frame = CGRect(x: safe.minX, y: top, width: safe.width, height: safe.maxY - top)
         } else {
-            videoView.frame = view.bounds
+            setVideoFrame(view.bounds)
             let height = (view.bounds.height * CGFloat(AppSettings.shared.overlayHeight)).rounded()
             inputOverlay.frame = CGRect(x: safe.minX, y: safe.maxY - height, width: safe.width, height: height)
         }
@@ -197,7 +259,129 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // Stream-wide gestures (scroll, three-finger tap) only for touches on
     // the video itself, not on the panels floating over it.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        touch.view === view || touch.view === videoView
+        touch.view === view || touch.view === videoView || touch.view === videoClip
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer is UIPinchGestureRecognizer {
+            return AppSettings.shared.pinchToZoom && activeMode != nil && receivingVideo
+        }
+        return true
+    }
+
+    // MARK: - Zoom (iPad only)
+
+    private func setVideoFrame(_ frame: CGRect) {
+        videoClip.frame = frame
+        videoView.transform = .identity
+        videoView.frame = videoClip.bounds
+        applyZoom()
+        layoutStatusBar()
+    }
+
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            pinchStartScale = zoomScale
+            // location(in:) undoes the current zoom transform.
+            let point = gesture.location(in: videoView)
+            let size = videoView.bounds.size
+            if zoomScale <= 1, size.width > 0, size.height > 0 {
+                zoomFocus = CGPoint(x: point.x / size.width, y: point.y / size.height)
+            }
+        case .changed:
+            zoomScale = min(max(pinchStartScale * gesture.scale, 1), 4)
+            applyZoom()
+        default:
+            break
+        }
+    }
+
+    @objc private func resetZoomTapped() {
+        setZoom(1, animated: true)
+    }
+
+    private func setZoom(_ scale: CGFloat, animated: Bool) {
+        zoomScale = scale
+        if scale <= 1 { zoomFocus = CGPoint(x: 0.5, y: 0.5) }
+        UIView.animate(withDuration: animated ? 0.2 : 0) { self.applyZoom() }
+    }
+
+    /// Scales the picture around zoomFocus, kept inside the screen.
+    private func applyZoom() {
+        let size = videoView.bounds.size
+        guard zoomScale > 1.01, size.width > 0 else {
+            zoomScale = 1
+            videoView.transform = .identity
+            return
+        }
+        let s = zoomScale
+        let limitX = (s - 1) * size.width / 2, limitY = (s - 1) * size.height / 2
+        let tx = min(max(-s * (zoomFocus.x - 0.5) * size.width, -limitX), limitX)
+        let ty = min(max(-s * (zoomFocus.y - 0.5) * size.height, -limitY), limitY)
+        // Store the clamped focus back so following the pointer starts from
+        // what's actually on screen.
+        zoomFocus = CGPoint(x: 0.5 - tx / (s * size.width), y: 0.5 - ty / (s * size.height))
+        videoView.transform = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: s, y: s)
+    }
+
+    /// While zoomed, pans just enough to keep the Mac pointer on screen.
+    private func followPointer() {
+        guard zoomScale > 1, AppSettings.shared.zoomFollowsPointer else { return }
+        let rect = letterboxedContentRect()
+        let size = videoView.bounds.size
+        guard rect.width > 0, size.width > 0 else { return }
+        let pointer = CGPoint(x: (rect.minX + cursorNorm.x * rect.width) / size.width,
+                              y: (rect.minY + cursorNorm.y * rect.height) / size.height)
+        let innerHalf = 0.35 / zoomScale   // pointer stays in the middle 70%
+        var focus = zoomFocus
+        if pointer.x > focus.x + innerHalf { focus.x = pointer.x - innerHalf }
+        if pointer.x < focus.x - innerHalf { focus.x = pointer.x + innerHalf }
+        if pointer.y > focus.y + innerHalf { focus.y = pointer.y - innerHalf }
+        if pointer.y < focus.y - innerHalf { focus.y = pointer.y + innerHalf }
+        guard focus != zoomFocus else { return }
+        zoomFocus = focus
+        applyZoom()
+    }
+
+    // MARK: - Status bar and clipboard
+
+    private func layoutStatusBar() {
+        let size = statusBar.intrinsicContentSize
+        let width = size.width + 20, height = size.height + 8
+        statusBar.frame = CGRect(x: videoClip.frame.maxX - width - 10, y: videoClip.frame.minY + 10,
+                                 width: width, height: height)
+    }
+
+    private func updateStatusBar() {
+        var parts: [String] = []
+        if let battery = macBattery { parts.append("Mac \(battery)%" + (macCharging ? " ⚡︎" : "")) }
+        if !statsText.isEmpty { parts.append(statsText) }
+        statusBar.text = parts.joined(separator: "  ·  ")
+        layoutStatusBar()
+    }
+
+    private func updateClipboardTimer(streaming: Bool) {
+        let wanted = streaming && AppSettings.shared.syncClipboard
+        if wanted, clipboardTimer == nil {
+            // Only copies made from now on are sent.
+            lastPasteboardCount = UIPasteboard.general.changeCount
+            clipboardTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+                self?.pollPasteboard()
+            }
+        } else if !wanted {
+            clipboardTimer?.invalidate()
+            clipboardTimer = nil
+        }
+    }
+
+    private func pollPasteboard() {
+        let pasteboard = UIPasteboard.general
+        guard pasteboard.changeCount != lastPasteboardCount else { return }
+        lastPasteboardCount = pasteboard.changeCount
+        if let text = pasteboard.string, text != lastClipboardFromMac {
+            receiver.sendClipboard(text)
+        }
     }
 
     // MARK: - Mode selection
@@ -210,6 +394,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         }
         if activeMode != mode { receivingVideo = false }
         activeMode = mode
+        AppSettings.shared.lastMode = mode
         controls.mode = mode
         receiver.request(mode: mode)
         updateScreen()
@@ -243,6 +428,9 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         inputOverlay.showsHideButton = !docked
         overlayToggle.isHidden = !streaming || overlayShown || docked
         cursorLayer.isHidden = !streaming || !cursorVisible || cursorLayer.contents == nil
+        statusBar.isHidden = !streaming || !AppSettings.shared.showStatusBar || statusBar.text?.isEmpty != false
+        updateClipboardTimer(streaming: streaming)
+        if !streaming, zoomScale > 1 { setZoom(1, animated: false) }
         // Mid-stream drop (app switch, cable pulled): keep the last frame
         // up and say so, rather than flashing back to the home screen.
         statusLabel.isHidden = !streaming || link != nil
@@ -254,6 +442,8 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // the last decoded frame. Force a clean reconnect on every return.
     @objc private func appWillEnterForeground() {
         receiver.ensureListening()
+        let settings = AppSettings.shared
+        if activeMode == nil, settings.autoStart, let mode = settings.lastMode { choose(mode) }
     }
 
     override func viewDidLayoutSubviews() {
@@ -286,7 +476,11 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     private func announcePanel() {
         let scale = UIScreen.main.scale
         let bounds = UIScreen.main.bounds
-        var wide = Int(bounds.width * scale), high = Int(bounds.height * scale)
+        // Display size: a smaller announced panel makes everything on the
+        // Mac bigger, a larger one gives more room (the picture is scaled to fit).
+        let size = AppSettings.shared.displaySize.panelScale
+        var wide = Int(Double(bounds.width * scale) * size) & ~1
+        var high = Int(Double(bounds.height * scale) * size) & ~1
         if high > wide, AppSettings.shared.portraitLayout != .rotate { swap(&wide, &high) }
         receiver.updatePanel(pixelsWide: wide, pixelsHigh: high, scale: Double(scale))
         if !receiverStarted {
@@ -306,6 +500,8 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         forwardTouch(touches, phase: "began")
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // A second finger means a pinch or scroll, not a drag on the Mac.
+        guard (event?.allTouches?.count ?? 1) < 2 else { return }
         forwardTouch(touches, phase: "moved")
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -386,6 +582,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     func videoReceiver(_ receiver: VideoReceiver, cursorDidChange point: CGPoint, visible: Bool) {
         cursorNorm = point
         cursorVisible = visible
+        followPointer()
         cursorLayer.isHidden = homeView.isHidden == false || !visible || cursorLayer.contents == nil
         updateCursorLayout()
     }
@@ -396,5 +593,23 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         cursorNormSize = normSize
         cursorLayer.isHidden = homeView.isHidden == false || !cursorVisible
         updateCursorLayout()
+    }
+
+    func videoReceiver(_ receiver: VideoReceiver, statsDidChange rttMs: Double?, fps: Int) {
+        statsText = (rttMs.map { "\(Int($0.rounded())) ms  ·  " } ?? "") + "\(fps) fps"
+        updateStatusBar()
+        updateScreen()
+    }
+
+    func videoReceiver(_ receiver: VideoReceiver, macStatusDidChange battery: Int?, charging: Bool, onAC: Bool) {
+        macBattery = battery
+        macCharging = charging
+        updateStatusBar()
+    }
+
+    func videoReceiver(_ receiver: VideoReceiver, clipboardDidArrive text: String) {
+        lastClipboardFromMac = text
+        UIPasteboard.general.string = text
+        lastPasteboardCount = UIPasteboard.general.changeCount
     }
 }

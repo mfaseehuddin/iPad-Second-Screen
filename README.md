@@ -13,7 +13,12 @@ Tested on an iPad Air (A1475, iOS 12.5.8) with a Mac on macOS 26. An iPhone on i
 - **See-through keyboard and trackpad.** A small arrow in the bottom-right corner opens an overlay: a full Mac keyboard on the left three quarters, a trackpad on the right quarter, and a macro bar above both.
 - **Macros.** One-tap shortcuts such as ⌃C, ⌃← / ⌃→ (switch desktops), Mission Control, ⌘Tab and Spotlight. Pick which ones appear in Settings.
 - **Portrait your way.** Hold the iPad upright for a Game Boy layout (the picture on top, keyboard and trackpad docked below), turn the Mac display upright to fill the screen, or stay in landscape.
-- **Settings.** Overlay opacity and height, trackpad speed, scroll direction, tap-to-click on the picture, and the macro list.
+- **Pinch to zoom.** Zoom into part of the Mac screen on the iPad. The zoom follows the Mac pointer.
+- **Mac trackpad gestures.** Three-finger swipes switch desktops, open Mission Control and show an app's windows; pinch zooms in apps.
+- **Clipboard sync.** Copy text on one device, paste it on the other.
+- **Status bar.** The Mac's battery, the round-trip latency, and frames per second.
+- **Your own macros.** Add any shortcut, such as ⌘⇧P, with a name.
+- **Settings.** Quality, display size, start automatically, overlay opacity and height, trackpad speed, scroll direction, tap-to-click on the picture, and the macro list.
 - **Cable or Wi-Fi.** The Mac prefers the cable (lower, steadier latency) and falls back to Wi-Fi when you unplug it.
 
 ## How it works
@@ -25,11 +30,12 @@ Two apps, one on each side:
 
 The patches (`patches/`, details in [patches/README.md](patches/README.md)) add what the iPad needs to be in charge:
 
-| Message (iPad → Mac) | Effect |
+| Message | Effect |
 | --- | --- |
-| `hello` with `mode` | Start in `extend` or `mirror`, whatever the Mac's own picker says. The iPad sends `hello` only after you tap a mode. |
+| `hello` with `mode` and `quality` | Start in `extend` or `mirror` at `best`, `balanced` or `fast` quality, whatever the Mac's own pickers say. The iPad sends `hello` only after you tap a mode. |
 | `standby` | Stop: the Mac removes the display and dials the iPad again, ready for the next tap. |
 | `key`, `text`, `mouse` | Keyboard, typed text and trackpad input. |
+| `subscribe`, `clipboard`, `macStatus` | Opt-in clipboard sync (both ways, text only) and the Mac's battery status. |
 | Bonjour TXT `gate=1` | A Wi-Fi iPad you've connected once can start a session at any time. |
 
 Devices you have never connected from the Mac still need one click there first. Another iPad on the same Wi-Fi can't start mirroring your screen.
@@ -127,6 +133,7 @@ While streaming:
 | --- | --- |
 | Tap / drag on the picture | Click / drag there (turn off in Settings for trackpad-only use) |
 | Two-finger drag on the picture | Scroll |
+| Pinch the picture / two-finger double-tap | Zoom in on the iPad / zoom back out |
 | Arrow, bottom-right corner | Open the keyboard and trackpad overlay |
 | ⌄ in the macro bar | Close the overlay |
 | Three-finger tap | Switch mode, open Settings, or **Stop** (back to the start screen) |
@@ -134,6 +141,12 @@ While streaming:
 **Keyboard.** Modifiers work two ways. You can hold ⌘ while tapping C. Or tap ⌘ once, and it lights up for the next key only. Tap a lit modifier again to cancel it. Delete, space and the arrow keys repeat while held. Keys are sent as Mac key codes, so the Mac's keyboard layout decides which character you get, just like a real keyboard.
 
 **Trackpad.** One finger moves the pointer, with acceleration. Tap to click, two-finger tap to right-click, two-finger drag to scroll. To drag, hold **L** and move with another finger. There's a second pair of **L** / **R** buttons at the left end of the macro bar, so your left thumb can click while your right hand is on the trackpad.
+
+**Trackpad gestures.** Three-finger swipe left or right switches desktops (⌃→ / ⌃←), swipe up opens Mission Control, swipe down shows the app's windows. Pinch on the trackpad zooms in apps (⌘+ / ⌘−).
+
+**Your own macros.** Settings → Macro bar → Add macro. Give it a key (a character such as `p`, or a name such as `esc`, `f5`, `pageup`) and modifiers. It shows up in the macro bar. Swipe left on it in Settings to delete it.
+
+**Display settings.** *Quality* trades sharpness for latency (Fast is good over Wi-Fi). *Size* changes how big the Mac's interface looks in Extend mode: Larger text, Default or More space. Changing either restarts the picture for a moment. *Start automatically* starts your last mode when the app opens. *Sync clipboard* sends copied text both ways while streaming.
 
 **Upright iPad.** Settings → When the iPad is upright:
 - **Picture on top, keyboard below** (default): the Mac display stays landscape at the top, with the keyboard and trackpad docked under it.

@@ -51,6 +51,12 @@ protocol VideoReceiverDelegate: AnyObject {
     func videoReceiver(_ receiver: VideoReceiver, cursorDidChange point: CGPoint, visible: Bool)
     /// anchor/normSize normalized against the Mac's captured display (see MacSender.pollCursorImage).
     func videoReceiver(_ receiver: VideoReceiver, cursorImageDidChange image: UIImage, anchor: CGPoint, normSize: CGSize)
+    /// Round trip to the Mac in ms (nil until measured) and decoded frames per second.
+    func videoReceiver(_ receiver: VideoReceiver, statsDidChange rttMs: Double?, fps: Int)
+    /// Mac battery percent (nil without a battery), charging, and on mains power.
+    func videoReceiver(_ receiver: VideoReceiver, macStatusDidChange battery: Int?, charging: Bool, onAC: Bool)
+    /// Text copied on the Mac.
+    func videoReceiver(_ receiver: VideoReceiver, clipboardDidArrive text: String)
 }
 
 final class VideoReceiver {
@@ -80,6 +86,15 @@ final class VideoReceiver {
     // Both are queue-confined.
     private var requestedMode: DisplayMode?
     private var helloSent = false
+
+    // Also queue-confined. Quality rides in hello; subscriptions go out in a
+    // "subscribe" message after it (patches/03-quality-clipboard-status.patch).
+    private var requestedQuality: String?
+    private var wantsClipboard = false
+    private var wantsStatus = false
+    private var framesSinceStats = 0
+    private var lastStatsAt = Date()
+    private var rttMs: Double?
 
     // Panel size announced to the Mac in "hello" so it can size the virtual
     // display to match. Queue-confined; set through updatePanel().
@@ -165,6 +180,43 @@ final class VideoReceiver {
                 self.sendControl(["type": "standby"], on: conn)
             }
         }
+    }
+
+    /// Stream quality to ask for ("best", "balanced", "fast"). Takes effect
+    /// on the next hello; call restartStream() to apply it now.
+    func setQuality(_ quality: String) {
+        queue.async { [weak self] in self?.requestedQuality = quality }
+    }
+
+    /// Rebuild the stream with the current settings: standby, then the Mac
+    /// redials and gets a fresh hello.
+    func restartStream() {
+        queue.async { [weak self] in
+            guard let self = self, self.helloSent else { return }
+            self.sendControl(["type": "standby"])
+        }
+    }
+
+    /// Opt in to clipboard sync and/or the Mac's battery status.
+    func subscribe(clipboard: Bool, status: Bool) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.wantsClipboard = clipboard
+            self.wantsStatus = status
+            if self.helloSent { self.sendSubscription() }
+        }
+    }
+
+    /// Text copied on the iPad, for the Mac's clipboard.
+    func sendClipboard(_ text: String) {
+        queue.async { [weak self] in
+            guard let self = self, self.wantsClipboard, text.utf8.count <= 16_000 else { return }
+            self.sendControl(["type": "clipboard", "text": text])
+        }
+    }
+
+    private func sendSubscription() {
+        sendControl(["type": "subscribe", "clipboard": wantsClipboard, "status": wantsStatus])
     }
 
     /// Ask the Mac to take the display down. The Mac redials and waits for
@@ -280,7 +332,27 @@ final class VideoReceiver {
                 self.connection = nil
                 self.setLink(nil)
             }
+            self.reportStats()
             self.scheduleWatchdog()
+        }
+    }
+
+    /// Every watchdog tick: frames per second since the last tick, and a ping
+    /// whose pong gives the round trip.
+    private func reportStats() {
+        let elapsed = Date().timeIntervalSince(lastStatsAt)
+        let fps = elapsed > 0 ? Int((Double(framesSinceStats) / elapsed).rounded()) : 0
+        framesSinceStats = 0
+        lastStatsAt = Date()
+        if helloSent, connection?.state == .ready {
+            sendControl(["type": "ping", "t": Date().timeIntervalSince1970 * 1000])
+        } else {
+            rttMs = nil
+        }
+        let rtt = rttMs
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.delegate?.videoReceiver(self, statsDidChange: rtt, fps: fps)
         }
     }
 
@@ -305,10 +377,12 @@ final class VideoReceiver {
             "device": UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone",
             "id": Self.installID,
             "mode": mode.rawValue,
+            "quality": requestedQuality ?? "best",
             // No "pv" field on purpose: an absent protocol version is
             // defined by the Mac app as protocol 1, which every released
             // OpenDisplay Mac build supports (minSupportedPeer stays at 1).
         ], on: conn)
+        sendSubscription()
     }
 
     /// x/y normalized [0,1] in *decoded video* space, origin top-left.
@@ -399,6 +473,25 @@ final class VideoReceiver {
         case "ping":
             // Reply so the Mac's liveness check on this connection is happy.
             sendControl(["type": "pong", "t": obj["t"] ?? 0, "mt": Date().timeIntervalSince1970 * 1000])
+        case "pong":
+            // Reply to our own ping (see reportStats).
+            if let sent = obj["t"] as? Double {
+                rttMs = Date().timeIntervalSince1970 * 1000 - sent
+            }
+        case "macStatus":
+            let battery = obj["battery"] as? Int
+            let charging = obj["charging"] as? Bool ?? false
+            let onAC = obj["onAC"] as? Bool ?? (battery == nil)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.delegate?.videoReceiver(self, macStatusDidChange: battery, charging: charging, onAC: onAC)
+            }
+        case "clipboard":
+            guard wantsClipboard, let text = obj["text"] as? String else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.delegate?.videoReceiver(self, clipboardDidArrive: text)
+            }
         case "cursor":
             let visible = (obj["v"] as? Int ?? 0) == 1
             let point = CGPoint(x: obj["x"] as? Double ?? 0, y: obj["y"] as? Double ?? 0)
@@ -540,6 +633,7 @@ final class VideoReceiver {
             displayLayer.flush()
         }
         displayLayer.enqueue(sample)
+        framesSinceStats += 1
     }
 
     // MARK: - Helpers

@@ -13,7 +13,19 @@ struct Macro {
     let code: Int
     let modifiers: [String]
 
-    static let all: [Macro] = [
+    /// Built-in macros plus the user's own (Settings → Add macro).
+    static var all: [Macro] { builtIn + AppSettings.shared.customMacros }
+
+    var isCustom: Bool { id.hasPrefix("custom-") }
+
+    /// "⌘⇧P"-style label for a key code and modifiers.
+    static func shortcutLabel(key: String, modifiers: [String]) -> String {
+        let symbols = ["ctrl": "⌃", "opt": "⌥", "shift": "⇧", "cmd": "⌘"]
+        let prefix = ["ctrl", "opt", "shift", "cmd"].filter(modifiers.contains).compactMap { symbols[$0] }.joined()
+        return prefix + (key.count == 1 ? key.uppercased() : key)
+    }
+
+    private static let builtIn: [Macro] = [
         Macro(id: "ctrl-c", title: "⌃C", detail: "Interrupt (terminal)", code: 8, modifiers: ["ctrl"]),
         Macro(id: "ctrl-d", title: "⌃D", detail: "End of input / exit shell", code: 2, modifiers: ["ctrl"]),
         Macro(id: "ctrl-r", title: "⌃R", detail: "Search shell history", code: 15, modifiers: ["ctrl"]),
@@ -34,6 +46,34 @@ struct Macro {
         Macro(id: "close", title: "⌘W", detail: "Close tab / window", code: 13, modifiers: ["cmd"]),
         Macro(id: "screenshot", title: "⌘⇧4", detail: "Screenshot selection", code: 21, modifiers: ["cmd", "shift"]),
     ]
+}
+
+/// Stream quality the Mac encodes at (OpenDisplay's StreamQuality).
+enum QualityChoice: String, CaseIterable {
+    case best, balanced, fast
+    var title: String { rawValue.capitalized }
+}
+
+/// How big things look on the Mac display: the panel size announced to the
+/// Mac is scaled by this, and the picture is scaled back to fit.
+enum DisplaySize: String, CaseIterable {
+    case larger, standard, moreSpace
+
+    var title: String {
+        switch self {
+        case .larger: return "Larger text"
+        case .standard: return "Default"
+        case .moreSpace: return "More space"
+        }
+    }
+
+    var panelScale: Double {
+        switch self {
+        case .larger: return 0.75
+        case .standard: return 1
+        case .moreSpace: return 1.25
+        }
+    }
 }
 
 /// What happens when the iPad is held upright.
@@ -104,6 +144,65 @@ final class AppSettings {
         set { set(newValue.rawValue, "portraitLayout") }
     }
 
+    var quality: QualityChoice {
+        get { QualityChoice(rawValue: defaults.string(forKey: "quality") ?? "") ?? .best }
+        set { set(newValue.rawValue, "quality") }
+    }
+
+    var displaySize: DisplaySize {
+        get { DisplaySize(rawValue: defaults.string(forKey: "displaySize") ?? "") ?? .standard }
+        set { set(newValue.rawValue, "displaySize") }
+    }
+
+    /// Start the last-used mode when the app opens.
+    var autoStart: Bool {
+        get { bool("autoStart", false) }
+        set { set(newValue, "autoStart") }
+    }
+
+    /// Mode used last, for autoStart. Not a user-facing setting: no change
+    /// notification.
+    var lastMode: DisplayMode? {
+        get { DisplayMode(rawValue: defaults.string(forKey: "lastMode") ?? "") }
+        set { defaults.set(newValue?.rawValue, forKey: "lastMode") }
+    }
+
+    var showStatusBar: Bool {
+        get { bool("showStatusBar", true) }
+        set { set(newValue, "showStatusBar") }
+    }
+
+    var syncClipboard: Bool {
+        get { bool("syncClipboard", true) }
+        set { set(newValue, "syncClipboard") }
+    }
+
+    var pinchToZoom: Bool {
+        get { bool("pinchToZoom", true) }
+        set { set(newValue, "pinchToZoom") }
+    }
+
+    var zoomFollowsPointer: Bool {
+        get { bool("zoomFollowsPointer", true) }
+        set { set(newValue, "zoomFollowsPointer") }
+    }
+
+    var customMacros: [Macro] {
+        get {
+            (defaults.array(forKey: "customMacros") as? [[String: Any]] ?? []).compactMap { item in
+                guard let id = item["id"] as? String, let title = item["title"] as? String,
+                      let code = item["code"] as? Int else { return nil }
+                return Macro(id: id, title: title, detail: item["detail"] as? String ?? "",
+                             code: code, modifiers: item["modifiers"] as? [String] ?? [])
+            }
+        }
+        set {
+            set(newValue.map { ["id": $0.id, "title": $0.title, "detail": $0.detail,
+                                "code": $0.code, "modifiers": $0.modifiers] as [String: Any] },
+                "customMacros")
+        }
+    }
+
     var enabledMacroIDs: [String] {
         get {
             defaults.stringArray(forKey: "enabledMacros")
@@ -123,7 +222,7 @@ final class AppSettings {
 final class SettingsViewController: UITableViewController {
 
     private enum Section: Int, CaseIterable {
-        case portrait, overlay, trackpad, touch, macros, about
+        case portrait, display, zoom, overlay, trackpad, touch, macros, about
     }
 
     private let settings = AppSettings.shared
@@ -154,13 +253,17 @@ final class SettingsViewController: UITableViewController {
         case .overlay, .trackpad: return 2
         case .touch, .about: return 1
         case .portrait: return PortraitLayout.allCases.count
-        case .macros: return Macro.all.count
+        case .display: return 5
+        case .zoom: return 2
+        case .macros: return Macro.all.count + 1
         }
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
         case .portrait: return "When the iPad is upright"
+        case .display: return "Display"
+        case .zoom: return "Zoom"
         case .overlay: return "Keyboard & trackpad overlay"
         case .trackpad: return "Trackpad"
         case .touch: return "Touch"
@@ -177,10 +280,14 @@ final class SettingsViewController: UITableViewController {
             case .rotate: return "The Mac display turns portrait to fill the screen (Extend mode). macOS rebuilds the display, so windows on it may move."
             case .landscape: return "The app doesn't rotate."
             }
+        case .display:
+            return "Quality: lower is smoother, especially on Wi-Fi. Size: Larger text makes the Mac's interface bigger (Extend mode). Changing either restarts the picture for a moment."
+        case .zoom:
+            return "Pinch the picture with two fingers to zoom in on the iPad; double-tap with two fingers to zoom back out. The Mac is unaffected."
         case .touch:
             return "Turn this off to drive the Mac only with the trackpad, so a stray touch on the picture never clicks. Handy with the Mac closed (clamshell)."
         case .macros:
-            return "Shortcuts shown above the keyboard. ⌃← / ⌃→ switch desktops when Mission Control's shortcuts are enabled on the Mac."
+            return "Shortcuts shown above the keyboard. ⌃← / ⌃→ switch desktops when Mission Control's shortcuts are enabled on the Mac. Swipe left on your own macros to delete them."
         default:
             return nil
         }
@@ -188,9 +295,32 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard Section(rawValue: indexPath.section) == .portrait else { return }
-        settings.portraitLayout = PortraitLayout.allCases[indexPath.row]
-        tableView.reloadSections(IndexSet(integer: indexPath.section), with: .none)
+        switch Section(rawValue: indexPath.section)! {
+        case .portrait:
+            settings.portraitLayout = PortraitLayout.allCases[indexPath.row]
+            tableView.reloadSections(IndexSet(integer: indexPath.section), with: .none)
+        case .macros where indexPath.row == Macro.all.count:
+            let editor = CustomMacroViewController { [weak self] in
+                self?.tableView.reloadSections(IndexSet(integer: Section.macros.rawValue), with: .automatic)
+            }
+            navigationController?.pushViewController(editor, animated: true)
+        default:
+            break
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
+        Section(rawValue: indexPath.section) == .macros && indexPath.row < Macro.all.count
+            && Macro.all[indexPath.row].isCustom
+    }
+
+    override func tableView(_ tableView: UITableView, commit editingStyle: UITableViewCell.EditingStyle,
+                            forRowAt indexPath: IndexPath) {
+        guard editingStyle == .delete else { return }
+        let macro = Macro.all[indexPath.row]
+        settings.customMacros = settings.customMacros.filter { $0.id != macro.id }
+        settings.enabledMacroIDs = settings.enabledMacroIDs.filter { $0 != macro.id }
+        tableView.deleteRows(at: [indexPath], with: .automatic)
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -201,6 +331,36 @@ final class SettingsViewController: UITableViewController {
             cell.textLabel?.text = layout.title
             cell.accessoryType = layout == settings.portraitLayout ? .checkmark : .none
             return cell
+        case (.display, 0):
+            return SegmentCell(title: "Quality", items: QualityChoice.allCases.map { $0.title },
+                               selected: QualityChoice.allCases.firstIndex(of: settings.quality) ?? 0) { [weak self] in
+                self?.settings.quality = QualityChoice.allCases[$0]
+            }
+        case (.display, 1):
+            return SegmentCell(title: "Size", items: DisplaySize.allCases.map { $0.title },
+                               selected: DisplaySize.allCases.firstIndex(of: settings.displaySize) ?? 1) { [weak self] in
+                self?.settings.displaySize = DisplaySize.allCases[$0]
+            }
+        case (.display, 2):
+            return SwitchCell(title: "Start automatically", isOn: settings.autoStart) { [weak self] in
+                self?.settings.autoStart = $0
+            }
+        case (.display, 3):
+            return SwitchCell(title: "Status bar (Mac battery, latency, fps)", isOn: settings.showStatusBar) { [weak self] in
+                self?.settings.showStatusBar = $0
+            }
+        case (.display, _):
+            return SwitchCell(title: "Sync clipboard with the Mac", isOn: settings.syncClipboard) { [weak self] in
+                self?.settings.syncClipboard = $0
+            }
+        case (.zoom, 0):
+            return SwitchCell(title: "Pinch to zoom", isOn: settings.pinchToZoom) { [weak self] in
+                self?.settings.pinchToZoom = $0
+            }
+        case (.zoom, _):
+            return SwitchCell(title: "Zoom follows the pointer", isOn: settings.zoomFollowsPointer) { [weak self] in
+                self?.settings.zoomFollowsPointer = $0
+            }
         case (.overlay, 0):
             return SliderCell(title: "Opacity", value: settings.overlayOpacity, range: 0.15...0.9) { [weak self] in
                 self?.settings.overlayOpacity = $0
@@ -221,6 +381,11 @@ final class SettingsViewController: UITableViewController {
             return SwitchCell(title: "Tap the picture to click", isOn: settings.directTouch) { [weak self] in
                 self?.settings.directTouch = $0
             }
+        case (.macros, let row) where row == Macro.all.count:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = "Add macro…"
+            cell.textLabel?.textColor = cell.tintColor
+            return cell
         case (.macros, let row):
             let macro = Macro.all[row]
             let cell = SwitchCell(title: macro.title, isOn: settings.enabledMacroIDs.contains(macro.id)) { [weak self] on in
@@ -258,6 +423,135 @@ private final class SwitchCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     @objc private func changed(_ toggle: UISwitch) { onChange(toggle.isOn) }
+}
+
+private final class SegmentCell: UITableViewCell {
+    private let onChange: (Int) -> Void
+
+    init(title: String, items: [String], selected: Int, onChange: @escaping (Int) -> Void) {
+        self.onChange = onChange
+        super.init(style: .default, reuseIdentifier: nil)
+        selectionStyle = .none
+        let label = UILabel()
+        label.text = title
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        let picker = UISegmentedControl(items: items)
+        picker.selectedSegmentIndex = selected
+        picker.addTarget(self, action: #selector(changed(_:)), for: .valueChanged)
+        let row = UIStackView(arrangedSubviews: [label, picker])
+        row.spacing = 16
+        row.alignment = .center
+        row.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
+            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            label.widthAnchor.constraint(equalToConstant: 80),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    @objc private func changed(_ picker: UISegmentedControl) { onChange(picker.selectedSegmentIndex) }
+}
+
+// MARK: - Custom macro editor
+
+/// Name + key + modifiers. The key is a character ("p", "4", "/") or a key
+/// name ("esc", "f5", "pageup", "left").
+final class CustomMacroViewController: UITableViewController {
+
+    private let onSave: () -> Void
+    private let nameField = UITextField()
+    private let keyField = UITextField()
+    private let modifierNames = ["cmd", "opt", "ctrl", "shift"]
+    private let modifierTitles = ["⌘ Command", "⌥ Option", "⌃ Control", "⇧ Shift"]
+    private var modifiers = Set<String>()
+
+    init(onSave: @escaping () -> Void) {
+        self.onSave = onSave
+        super.init(style: .grouped)
+        title = "New macro"
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .save, target: self,
+                                                            action: #selector(save))
+        nameField.placeholder = "Name (optional), e.g. Command palette"
+        keyField.placeholder = "Key: p, 4, /, esc, tab, f5, left, pageup…"
+        for field in [nameField, keyField] {
+            field.autocorrectionType = .no
+            field.autocapitalizationType = .none
+            field.clearButtonMode = .whileEditing
+        }
+    }
+
+    override func numberOfSections(in tableView: UITableView) -> Int { 3 }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        section == 2 ? modifierNames.count : 1
+    }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        ["Name", "Key", "Modifiers"][section]
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+        cell.selectionStyle = .none
+        if indexPath.section < 2 {
+            let field = indexPath.section == 0 ? nameField : keyField
+            field.translatesAutoresizingMaskIntoConstraints = false
+            cell.contentView.addSubview(field)
+            NSLayoutConstraint.activate([
+                field.leadingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.leadingAnchor),
+                field.trailingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.trailingAnchor),
+                field.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 10),
+                field.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -10),
+            ])
+        } else {
+            let name = modifierNames[indexPath.row]
+            cell.textLabel?.text = modifierTitles[indexPath.row]
+            let toggle = UISwitch()
+            toggle.isOn = modifiers.contains(name)
+            toggle.tag = indexPath.row
+            toggle.addTarget(self, action: #selector(modifierChanged(_:)), for: .valueChanged)
+            cell.accessoryView = toggle
+        }
+        return cell
+    }
+
+    @objc private func modifierChanged(_ toggle: UISwitch) {
+        let name = modifierNames[toggle.tag]
+        if toggle.isOn { modifiers.insert(name) } else { modifiers.remove(name) }
+    }
+
+    @objc private func save() {
+        let key = (keyField.text ?? "").trimmingCharacters(in: .whitespaces)
+        guard let code = MacKeyCode.code(for: key) else {
+            let alert = UIAlertController(title: "Unknown key",
+                                          message: "Use a single character (p, 4, /) or a key name: esc, tab, return, space, delete, up, down, left, right, home, end, pageup, pagedown, f1–f12.",
+                                          preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
+            return
+        }
+        let ordered = modifierNames.filter(modifiers.contains)
+        let shortcut = Macro.shortcutLabel(key: key, modifiers: ordered)
+        let name = (nameField.text ?? "").trimmingCharacters(in: .whitespaces)
+        let macro = Macro(id: "custom-\(UUID().uuidString)", title: name.isEmpty ? shortcut : name,
+                          detail: name.isEmpty ? "Custom" : shortcut, code: code, modifiers: ordered)
+        let settings = AppSettings.shared
+        settings.customMacros = settings.customMacros + [macro]
+        settings.enabledMacroIDs = settings.enabledMacroIDs + [macro.id]
+        onSave()
+        navigationController?.popViewController(animated: true)
+    }
 }
 
 private final class SliderCell: UITableViewCell {

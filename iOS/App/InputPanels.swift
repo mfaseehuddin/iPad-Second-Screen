@@ -13,6 +13,31 @@ import UIKit
 enum MacKeyCode {
     static let returnKey = 36, tab = 48, space = 49, delete = 51, escape = 53
     static let left = 123, right = 124, down = 125, up = 126
+    static let equals = 24, minus = 27
+
+    private static let characters: [Character: Int] = [
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+        "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19,
+        "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28,
+        "0": 29, "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "l": 37, "j": 38,
+        "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47,
+        "`": 50,
+    ]
+    private static let names: [String: Int] = [
+        "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51, "backspace": 51,
+        "esc": 53, "escape": 53, "left": 123, "right": 124, "down": 125, "up": 126,
+        "home": 115, "end": 119, "pageup": 116, "pagedown": 121, "forwarddelete": 117,
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98, "f8": 100,
+        "f9": 101, "f10": 109, "f11": 103, "f12": 111,
+    ]
+
+    /// Key code for a single character ("p", "4", "/") or a key name
+    /// ("esc", "f5", "pageup"). nil if unknown.
+    static func code(for key: String) -> Int? {
+        let lowered = key.lowercased().replacingOccurrences(of: " ", with: "")
+        if lowered.count == 1, let character = lowered.first { return characters[character] }
+        return names[lowered]
+    }
 }
 
 /// A view that swallows stray touches, so taps on the overlay's gaps never
@@ -79,6 +104,7 @@ final class InputOverlay: PanelView {
         trackpad.onClick = { [weak self] button in self?.onClick?(button) }
         trackpad.onButton = { [weak self] button, down in self?.onButton?(button, down) }
         trackpad.onScroll = { [weak self] dx, dy in self?.onScroll?(dx, dy) }
+        trackpad.onKey = { [weak self] code, modifiers in self?.onKey?(code, modifiers) }
         [macroBar, keyboard, trackpad].forEach(addSubview)
         applySettings()
     }
@@ -492,6 +518,8 @@ private final class MacKeyboardView: UIView {
 
 /// One finger moves the cursor, tap clicks, two-finger tap right-clicks,
 /// two-finger drag scrolls. Hold L or R and move with another finger to drag.
+/// Mac trackpad gestures: three-finger swipe left/right switches desktops,
+/// up opens Mission Control, down shows the app's windows; pinch zooms (⌘+ / ⌘−).
 private final class TrackpadView: UIView {
 
     /// dx/dy in Mac points.
@@ -499,9 +527,12 @@ private final class TrackpadView: UIView {
     var onClick: ((String) -> Void)?
     var onButton: ((String, Bool) -> Void)?
     var onScroll: ((Double, Double) -> Void)?
+    /// Shortcuts the gestures stand for.
+    var onKey: ((Int, [String]) -> Void)?
     var padOpacity: CGFloat = 0.4 { didSet { restyle() } }
 
     private let pad = UIView()
+    private var pinchSteps = 0
     private let left = overlayButton("L")
     private let right = overlayButton("R")
     private var heldButtons = Set<String>()
@@ -529,7 +560,10 @@ private final class TrackpadView: UIView {
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
         let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(twoFingerTapped))
         twoFingerTap.numberOfTouchesRequired = 2
-        for gesture in [move, scroll, tap, twoFingerTap] { pad.addGestureRecognizer(gesture) }
+        let swipe = UIPanGestureRecognizer(target: self, action: #selector(swiped(_:)))
+        swipe.minimumNumberOfTouches = 3
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+        for gesture in [move, scroll, tap, twoFingerTap, swipe, pinch] { pad.addGestureRecognizer(gesture) }
         restyle()
     }
 
@@ -578,6 +612,35 @@ private final class TrackpadView: UIView {
 
     @objc private func tapped() { onClick?("left") }
     @objc private func twoFingerTapped() { onClick?("right") }
+
+    /// One shortcut per swipe, picked by the dominant direction. Like a Mac
+    /// trackpad: swipe left moves to the desktop on the right.
+    @objc private func swiped(_ gesture: UIPanGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+        let t = gesture.translation(in: pad)
+        guard max(abs(t.x), abs(t.y)) > 30 else { return }
+        let code: Int
+        if abs(t.x) > abs(t.y) {
+            code = t.x < 0 ? MacKeyCode.right : MacKeyCode.left
+        } else {
+            code = t.y < 0 ? MacKeyCode.up : MacKeyCode.down
+        }
+        onKey?(code, ["ctrl"])
+    }
+
+    /// Zoom in or out one step (⌘+ / ⌘−) for every 25% of pinch.
+    @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            pinchSteps = 0
+        case .changed:
+            let steps = Int((log(Double(gesture.scale)) / log(1.25)).rounded(.towardZero))
+            while pinchSteps < steps { pinchSteps += 1; onKey?(MacKeyCode.equals, ["cmd"]) }
+            while pinchSteps > steps { pinchSteps -= 1; onKey?(MacKeyCode.minus, ["cmd"]) }
+        default:
+            break
+        }
+    }
 
     @objc private func buttonDown(_ button: UIButton) {
         let name = button.accessibilityIdentifier ?? "left"
