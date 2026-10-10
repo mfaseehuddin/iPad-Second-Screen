@@ -47,12 +47,22 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     override var prefersStatusBarHidden: Bool { true }
     override var prefersHomeIndicatorAutoHidden: Bool { true }
 
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        AppSettings.shared.portraitLayout == .landscape ? .landscape : .all
+    }
+
+    private var isPortrait: Bool { view.bounds.height > view.bounds.width }
+
+    /// Game Boy layout: upright iPad, picture at the top, overlay docked below.
+    private var docked: Bool {
+        isPortrait && AppSettings.shared.portraitLayout == .gameBoy && activeMode != nil && receivingVideo
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
 
         videoView.frame = view.bounds
-        videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(videoView)
         videoView.layer.addSublayer(cursorLayer)
 
@@ -132,6 +142,9 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
 
     @objc private func settingsChanged() {
         inputOverlay.applySettings()
+        UIViewController.attemptRotationToDeviceOrientation()
+        announcePanel()
+        updateScreen()
         view.setNeedsLayout()
     }
 
@@ -154,11 +167,23 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         })
     }
 
-    /// Overlay: bottom band, settings-sized. Toggle arrow: bottom-right corner.
+    /// Video: full screen, or a landscape band at the top when docked.
+    /// Overlay: bottom band (settings-sized), or everything under the video
+    /// when docked. Toggle arrow: bottom-right corner.
     private func layoutInputOverlay() {
         let safe = view.bounds.inset(by: view.safeAreaInsets)
-        let height = (view.bounds.height * CGFloat(AppSettings.shared.overlayHeight)).rounded()
-        inputOverlay.frame = CGRect(x: safe.minX, y: safe.maxY - height, width: safe.width, height: height)
+        if docked {
+            let aspect = lastVideoSize.width > 0 ? lastVideoSize.height / lastVideoSize.width
+                                                 : safe.width / safe.height
+            videoView.frame = CGRect(x: 0, y: safe.minY, width: view.bounds.width,
+                                     height: (view.bounds.width * aspect).rounded())
+            let top = videoView.frame.maxY + 6
+            inputOverlay.frame = CGRect(x: safe.minX, y: top, width: safe.width, height: safe.maxY - top)
+        } else {
+            videoView.frame = view.bounds
+            let height = (view.bounds.height * CGFloat(AppSettings.shared.overlayHeight)).rounded()
+            inputOverlay.frame = CGRect(x: safe.minX, y: safe.maxY - height, width: safe.width, height: height)
+        }
         overlayToggle.center = CGPoint(x: safe.maxX - overlayToggle.bounds.width / 2 - 10,
                                        y: safe.maxY - overlayToggle.bounds.height / 2 - 10)
     }
@@ -214,8 +239,9 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
                 inputOverlay.releaseAll()
             }
         }
-        inputOverlay.isHidden = !streaming || !overlayShown
-        overlayToggle.isHidden = !streaming || overlayShown
+        inputOverlay.isHidden = !streaming || !(overlayShown || docked)
+        inputOverlay.showsHideButton = !docked
+        overlayToggle.isHidden = !streaming || overlayShown || docked
         cursorLayer.isHidden = !streaming || !cursorVisible || cursorLayer.contents == nil
         // Mid-stream drop (app switch, cable pulled): keep the last frame
         // up and say so, rather than flashing back to the home screen.
@@ -232,6 +258,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateScreen()
         layoutInputOverlay()
         announcePanel()
         updateCursorLayout()
@@ -254,12 +281,14 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         CATransaction.commit()
     }
 
+    /// Tells the Mac the panel size to build the display at: upright only in
+    /// "Turn the Mac display upright", landscape otherwise.
     private func announcePanel() {
         let scale = UIScreen.main.scale
         let bounds = UIScreen.main.bounds
-        receiver.devicePixelsWide = Int(bounds.width * scale)
-        receiver.devicePixelsHigh = Int(bounds.height * scale)
-        receiver.deviceScale = Double(scale)
+        var wide = Int(bounds.width * scale), high = Int(bounds.height * scale)
+        if high > wide, AppSettings.shared.portraitLayout != .rotate { swap(&wide, &high) }
+        receiver.updatePanel(pixelsWide: wide, pixelsHigh: high, scale: Double(scale))
         if !receiverStarted {
             receiverStarted = true
             receiver.start(port: 9000)
@@ -295,7 +324,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     }
 
     private func sendNormalized(touch: UITouch, phase: String) {
-        let point = touch.location(in: view)
+        let point = touch.location(in: videoView)
         let contentRect = letterboxedContentRect()
         guard contentRect.width > 0, contentRect.height > 0 else { return }
         let clampedX = min(max(point.x, contentRect.minX), contentRect.maxX)
@@ -350,6 +379,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         // Frames left over from a stopped stream can still trickle in.
         if activeMode != nil, link != nil { receivingVideo = true }
         updateScreen()
+        view.setNeedsLayout()
         updateCursorLayout()
     }
 

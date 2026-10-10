@@ -36,6 +36,19 @@ struct Macro {
     ]
 }
 
+/// What happens when the iPad is held upright.
+enum PortraitLayout: String, CaseIterable {
+    case gameBoy, rotate, landscape
+
+    var title: String {
+        switch self {
+        case .gameBoy: return "Picture on top, keyboard below"
+        case .rotate: return "Turn the Mac display upright"
+        case .landscape: return "Stay in landscape"
+        }
+    }
+}
+
 final class AppSettings {
 
     static let shared = AppSettings()
@@ -86,6 +99,11 @@ final class AppSettings {
         set { set(newValue, "directTouch") }
     }
 
+    var portraitLayout: PortraitLayout {
+        get { PortraitLayout(rawValue: defaults.string(forKey: "portraitLayout") ?? "") ?? .gameBoy }
+        set { set(newValue.rawValue, "portraitLayout") }
+    }
+
     var enabledMacroIDs: [String] {
         get {
             defaults.stringArray(forKey: "enabledMacros")
@@ -105,7 +123,7 @@ final class AppSettings {
 final class SettingsViewController: UITableViewController {
 
     private enum Section: Int, CaseIterable {
-        case overlay, trackpad, touch, macros, about
+        case portrait, overlay, trackpad, touch, macros, about
     }
 
     private let settings = AppSettings.shared
@@ -135,12 +153,14 @@ final class SettingsViewController: UITableViewController {
         switch Section(rawValue: section)! {
         case .overlay, .trackpad: return 2
         case .touch, .about: return 1
+        case .portrait: return PortraitLayout.allCases.count
         case .macros: return Macro.all.count
         }
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
+        case .portrait: return "When the iPad is upright"
         case .overlay: return "Keyboard & trackpad overlay"
         case .trackpad: return "Trackpad"
         case .touch: return "Touch"
@@ -151,6 +171,12 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
+        case .portrait:
+            switch settings.portraitLayout {
+            case .gameBoy: return "The Mac display stays landscape at the top of the screen, with the keyboard and trackpad docked below it, like a Game Boy."
+            case .rotate: return "The Mac display turns portrait to fill the screen (Extend mode). macOS rebuilds the display, so windows on it may move."
+            case .landscape: return "The app doesn't rotate."
+            }
         case .touch:
             return "Turn this off to drive the Mac only with the trackpad, so a stray touch on the picture never clicks. Handy with the Mac closed (clamshell)."
         case .macros:
@@ -160,8 +186,21 @@ final class SettingsViewController: UITableViewController {
         }
     }
 
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        guard Section(rawValue: indexPath.section) == .portrait else { return }
+        settings.portraitLayout = PortraitLayout.allCases[indexPath.row]
+        tableView.reloadSections(IndexSet(integer: indexPath.section), with: .none)
+    }
+
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         switch (Section(rawValue: indexPath.section)!, indexPath.row) {
+        case (.portrait, let row):
+            let layout = PortraitLayout.allCases[row]
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = layout.title
+            cell.accessoryType = layout == settings.portraitLayout ? .checkmark : .none
+            return cell
         case (.overlay, 0):
             return SliderCell(title: "Opacity", value: settings.overlayOpacity, range: 0.15...0.9) { [weak self] in
                 self?.settings.overlayOpacity = $0

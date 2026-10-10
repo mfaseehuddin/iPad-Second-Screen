@@ -74,6 +74,7 @@ final class InputOverlay: PanelView {
         macroBar.onMacro = { [weak self] macro in self?.onKey?(macro.code, macro.modifiers) }
         macroBar.onSettings = { [weak self] in self?.onSettings?() }
         macroBar.onHide = { [weak self] in self?.onHide?() }
+        macroBar.onButton = { [weak self] button, down in self?.onButton?(button, down) }
         trackpad.onMove = { [weak self] dx, dy in self?.onMove?(dx, dy) }
         trackpad.onClick = { [weak self] button in self?.onClick?(button) }
         trackpad.onButton = { [weak self] button, down in self?.onButton?(button, down) }
@@ -93,10 +94,17 @@ final class InputOverlay: PanelView {
         macroBar.macros = settings.enabledMacros
     }
 
+    /// Docked under the picture (Game Boy layout), the overlay can't be hidden.
+    var showsHideButton: Bool {
+        get { macroBar.showsHide }
+        set { macroBar.showsHide = newValue }
+    }
+
     /// Releases any key or button still held, e.g. when the overlay hides.
     func releaseAll() {
         keyboard.releaseAll()
         trackpad.releaseButtons()
+        macroBar.releaseButtons()
     }
 
     override func layoutSubviews() {
@@ -138,10 +146,18 @@ private final class MacroBar: UIView {
     var onMacro: ((Macro) -> Void)?
     var onSettings: (() -> Void)?
     var onHide: (() -> Void)?
+    /// Mouse button held (true) or released (false) from the bar's L / R.
+    var onButton: ((String, Bool) -> Void)?
 
     var macros: [Macro] = [] { didSet { rebuild() } }
     var buttonOpacity: CGFloat = 0.4 { didSet { restyle() } }
+    var showsHide = true { didSet { hideButton.isHidden = !showsHide; setNeedsLayout() } }
 
+    // Left-hand mouse buttons, so the left thumb clicks while the right hand
+    // is on the trackpad. Hold one and move on the trackpad to drag.
+    private let leftClick = overlayButton("L")
+    private let rightClick = overlayButton("R")
+    private var heldButtons = Set<String>()
     private let scroll = UIScrollView()
     private let row = UIStackView()
     private let settingsButton = overlayButton("Settings")
@@ -160,6 +176,15 @@ private final class MacroBar: UIView {
         hideButton.layer.addSublayer(chevronLayer(pointingUp: false, in: CGSize(width: 44, height: 40)))
         hideButton.addTarget(self, action: #selector(hideTapped), for: .touchUpInside)
         addSubview(hideButton)
+        for (button, name) in [(leftClick, "left"), (rightClick, "right")] {
+            button.accessibilityIdentifier = name
+            button.layer.borderWidth = 1
+            button.layer.borderColor = UIColor(white: 1, alpha: 0.18).cgColor
+            button.addTarget(self, action: #selector(clickDown(_:)), for: .touchDown)
+            button.addTarget(self, action: #selector(clickUp(_:)),
+                             for: [.touchUpInside, .touchUpOutside, .touchCancel])
+            addSubview(button)
+        }
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
@@ -173,12 +198,17 @@ private final class MacroBar: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let hideWidth: CGFloat = 44
+        let clickWidth: CGFloat = 56
+        leftClick.frame = CGRect(x: 0, y: 0, width: clickWidth, height: bounds.height)
+        rightClick.frame = CGRect(x: clickWidth + 6, y: 0, width: clickWidth, height: bounds.height)
+        let hideWidth: CGFloat = showsHide ? 44 : 0
         let settingsWidth = settingsButton.intrinsicContentSize.width
         hideButton.frame = CGRect(x: bounds.maxX - hideWidth, y: 0, width: hideWidth, height: bounds.height)
-        settingsButton.frame = CGRect(x: hideButton.frame.minX - 6 - settingsWidth, y: 0,
+        settingsButton.frame = CGRect(x: bounds.maxX - hideWidth - (showsHide ? 6 : 0) - settingsWidth, y: 0,
                                       width: settingsWidth, height: bounds.height)
-        scroll.frame = CGRect(x: 0, y: 0, width: settingsButton.frame.minX - 10, height: bounds.height)
+        let scrollX = rightClick.frame.maxX + 12
+        scroll.frame = CGRect(x: scrollX, y: 0, width: settingsButton.frame.minX - 10 - scrollX,
+                              height: bounds.height)
     }
 
     private func rebuild() {
@@ -194,12 +224,29 @@ private final class MacroBar: UIView {
 
     private func restyle() {
         let background = UIColor(white: 0.08, alpha: buttonOpacity)
-        for case let button as UIButton in row.arrangedSubviews + [settingsButton, hideButton] {
+        for case let button as UIButton in row.arrangedSubviews + [settingsButton, hideButton, leftClick, rightClick] {
             button.backgroundColor = background
         }
     }
 
     @objc private func macroTapped(_ button: UIButton) { onMacro?(macros[button.tag]) }
+
+    @objc private func clickDown(_ button: UIButton) {
+        let name = button.accessibilityIdentifier ?? "left"
+        heldButtons.insert(name)
+        onButton?(name, true)
+    }
+
+    @objc private func clickUp(_ button: UIButton) {
+        let name = button.accessibilityIdentifier ?? "left"
+        guard heldButtons.remove(name) != nil else { return }
+        onButton?(name, false)
+    }
+
+    func releaseButtons() {
+        heldButtons.forEach { onButton?($0, false) }
+        heldButtons.removeAll()
+    }
     @objc private func settingsTapped() { onSettings?() }
     @objc private func hideTapped() { onHide?() }
 }

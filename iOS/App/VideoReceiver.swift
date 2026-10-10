@@ -81,11 +81,11 @@ final class VideoReceiver {
     private var requestedMode: DisplayMode?
     private var helloSent = false
 
-    // Native panel size announced to the Mac in "hello" so it can size the
-    // virtual display to match. Set these before calling start().
-    var devicePixelsWide: Int = 0
-    var devicePixelsHigh: Int = 0
-    var deviceScale: Double = 2
+    // Panel size announced to the Mac in "hello" so it can size the virtual
+    // display to match. Queue-confined; set through updatePanel().
+    private var devicePixelsWide: Int = 0
+    private var devicePixelsHigh: Int = 0
+    private var deviceScale: Double = 2
 
     // Stable per-install id (helps the Mac recognize "same device, other
     // transport"); persisted so it survives relaunches.
@@ -132,6 +132,22 @@ final class VideoReceiver {
             self.startListener()
         }
         advertise()
+    }
+
+    /// The panel size to announce in hello. If it changes mid-session (the
+    /// iPad rotated and the display should follow), hello is sent again and
+    /// the Mac rebuilds the virtual display at the new size.
+    func updatePanel(pixelsWide: Int, pixelsHigh: Int, scale: Double) {
+        queue.async { [weak self] in
+            guard let self = self,
+                  pixelsWide != self.devicePixelsWide || pixelsHigh != self.devicePixelsHigh else { return }
+            self.devicePixelsWide = pixelsWide
+            self.devicePixelsHigh = pixelsHigh
+            self.deviceScale = scale
+            if self.helloSent, let conn = self.connection, conn.state == .ready {
+                self.sendHello(on: conn)
+            }
+        }
     }
 
     /// Ask the Mac to start (or switch to) `mode`. Takes effect as soon as a

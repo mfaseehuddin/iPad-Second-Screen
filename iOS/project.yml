@@ -32,6 +32,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
         NSLocalNetworkUsageDescription: "LegacyPadDisplay listens on the local network / USB so your Mac can send it a video stream."
         NSBonjourServices:
           - "_opensidecar._tcp"

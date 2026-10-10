@@ -12,6 +12,7 @@ Tested on an iPad Air (A1475, iOS 12.5.8) with a Mac on macOS 26. An iPhone on i
 - **Touch.** Tap the picture to click there, drag to drag, and use two fingers to scroll.
 - **See-through keyboard and trackpad.** A small arrow in the bottom-right corner opens an overlay: a full Mac keyboard on the left three quarters, a trackpad on the right quarter, and a macro bar above both.
 - **Macros.** One-tap shortcuts such as ⌃C, ⌃← / ⌃→ (switch desktops), Mission Control, ⌘Tab and Spotlight. Pick which ones appear in Settings.
+- **Portrait your way.** Hold the iPad upright for a Game Boy layout (the picture on top, keyboard and trackpad docked below), turn the Mac display upright to fill the screen, or stay in landscape.
 - **Settings.** Overlay opacity and height, trackpad speed, scroll direction, tap-to-click on the picture, and the macro list.
 - **Cable or Wi-Fi.** The Mac prefers the cable (lower, steadier latency) and falls back to Wi-Fi when you unplug it.
 
@@ -132,7 +133,12 @@ While streaming:
 
 **Keyboard.** Modifiers work two ways. You can hold ⌘ while tapping C. Or tap ⌘ once, and it lights up for the next key only. Tap a lit modifier again to cancel it. Delete, space and the arrow keys repeat while held. Keys are sent as Mac key codes, so the Mac's keyboard layout decides which character you get, just like a real keyboard.
 
-**Trackpad.** One finger moves the pointer, with acceleration. Tap to click, two-finger tap to right-click, two-finger drag to scroll. To drag, hold **L** and move with another finger.
+**Trackpad.** One finger moves the pointer, with acceleration. Tap to click, two-finger tap to right-click, two-finger drag to scroll. To drag, hold **L** and move with another finger. There's a second pair of **L** / **R** buttons at the left end of the macro bar, so your left thumb can click while your right hand is on the trackpad.
+
+**Upright iPad.** Settings → When the iPad is upright:
+- **Picture on top, keyboard below** (default): the Mac display stays landscape at the top, with the keyboard and trackpad docked under it.
+- **Turn the Mac display upright:** the Mac rebuilds the display in portrait to fill the screen (Extend mode only). Windows on it may move.
+- **Stay in landscape:** the app doesn't rotate.
 
 ## Clamshell: run the Mac with the lid closed
 
@@ -159,7 +165,7 @@ Use **Extend**, not Mirror. Mirror shows the Mac's own screen, and that screen t
 - **A brief black frame when you return to the app.** That's the reconnect: iOS suspends the listener in the background, and the app restarts it when it comes back.
 - **`updateRequired` from the Mac.** A newer OpenDisplay raised its minimum protocol version. The iPad app speaks protocol 1, which the patched version (v1.13.0) accepts.
 
-Not done yet: matching the iPad's rotation, and a hardware (Bluetooth) keyboard on the iPad.
+Not done yet: a hardware (Bluetooth) keyboard on the iPad.
 
 ## Repository layout
 
