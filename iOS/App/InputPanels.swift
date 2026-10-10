@@ -49,6 +49,15 @@ class PanelView: UIView {
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
 }
 
+/// A two-finger tap is a right click only when the fingers are close
+/// together. A far-apart pair is a tap plus a resting thumb, palm or other
+/// finger, so it counts as a left click.
+func clickButton(forTwoFingerTap gesture: UIGestureRecognizer) -> String {
+    guard gesture.numberOfTouches >= 2, let view = gesture.view else { return "right" }
+    let a = gesture.location(ofTouch: 0, in: view), b = gesture.location(ofTouch: 1, in: view)
+    return hypot(a.x - b.x, a.y - b.y) <= 140 ? "right" : "left"
+}
+
 /// Pointer acceleration for relative moves: slow moves stay precise, fast
 /// flicks cross the whole Mac screen. Shared by the trackpad panel and the
 /// picture in trackpad mode.
@@ -293,7 +302,7 @@ private final class MacroBar: UIView {
         super.layoutSubviews()
         let clickWidth: CGFloat = 56
         leftClick.frame = CGRect(x: 0, y: 0, width: clickWidth, height: bounds.height)
-        rightClick.frame = CGRect(x: clickWidth + 6, y: 0, width: clickWidth, height: bounds.height)
+        rightClick.frame = CGRect(x: clickWidth + 14, y: 0, width: clickWidth, height: bounds.height)
         let hideWidth: CGFloat = showsHide ? 44 : 0
         let settingsWidth = settingsButton.intrinsicContentSize.width
         hideButton.frame = CGRect(x: bounds.maxX - hideWidth, y: 0, width: hideWidth, height: bounds.height)
@@ -688,7 +697,7 @@ private final class TrackpadView: UIView {
         scroll.minimumNumberOfTouches = 2
         scroll.maximumNumberOfTouches = 2
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
-        let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(twoFingerTapped))
+        let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(twoFingerTapped(_:)))
         twoFingerTap.numberOfTouchesRequired = 2
         let swipe = UIPanGestureRecognizer(target: self, action: #selector(swiped(_:)))
         swipe.minimumNumberOfTouches = 3
@@ -710,9 +719,9 @@ private final class TrackpadView: UIView {
             scrollStrip.viewWithTag(100 + index)?.frame = CGRect(x: 10, y: padHeight / 2 - 8 + CGFloat(index) * 7,
                                                                   width: stripWidth - 20, height: 2)
         }
-        let half = (bounds.width - 6) / 2
+        let half = (bounds.width - 14) / 2
         left.frame = CGRect(x: 0, y: pad.frame.maxY + 6, width: half, height: buttonHeight)
-        right.frame = CGRect(x: half + 6, y: pad.frame.maxY + 6, width: half, height: buttonHeight)
+        right.frame = CGRect(x: half + 14, y: pad.frame.maxY + 6, width: half, height: buttonHeight)
     }
 
     private func restyle() {
@@ -755,7 +764,9 @@ private final class TrackpadView: UIView {
     }
 
     @objc private func tapped() { onClick?("left") }
-    @objc private func twoFingerTapped() { onClick?("right") }
+    @objc private func twoFingerTapped(_ gesture: UITapGestureRecognizer) {
+        onClick?(clickButton(forTwoFingerTap: gesture))
+    }
 
     /// One shortcut per swipe, picked by the dominant direction. Like a Mac
     /// trackpad: swipe left moves to the desktop on the right.

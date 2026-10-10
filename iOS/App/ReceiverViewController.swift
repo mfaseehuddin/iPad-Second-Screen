@@ -153,7 +153,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         let pictureMove = UIPanGestureRecognizer(target: self, action: #selector(pictureMoved(_:)))
         pictureMove.maximumNumberOfTouches = 1
         let pictureTap = UITapGestureRecognizer(target: self, action: #selector(pictureTapped))
-        let pictureRightTap = UITapGestureRecognizer(target: self, action: #selector(pictureRightTapped))
+        let pictureRightTap = UITapGestureRecognizer(target: self, action: #selector(pictureRightTapped(_:)))
         pictureRightTap.numberOfTouchesRequired = 2
         pictureRightTap.require(toFail: resetZoom)
         let pictureSwipe = UIPanGestureRecognizer(target: self, action: #selector(pictureSwiped(_:)))
@@ -329,8 +329,8 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         receiver.sendMouse(action: "click", button: "left")
     }
 
-    @objc private func pictureRightTapped() {
-        receiver.sendMouse(action: "click", button: "right")
+    @objc private func pictureRightTapped(_ gesture: UITapGestureRecognizer) {
+        receiver.sendMouse(action: "click", button: clickButton(forTwoFingerTap: gesture))
     }
 
     /// Three-finger swipe: desktops, Mission Control, app windows (like the trackpad).
