@@ -305,6 +305,21 @@ final class VideoReceiver {
         sendControl(["type": "scroll", "dx": dx, "dy": dy])
     }
 
+    /// One key press: a macOS virtual key code plus "cmd"/"opt"/"ctrl"/"shift".
+    func sendKey(code: Int, modifiers: [String]) {
+        sendControl(["type": "key", "code": code, "mods": modifiers])
+    }
+
+    /// Typed characters, inserted on the Mac as-is.
+    func sendText(_ text: String) {
+        sendControl(["type": "text", "text": text])
+    }
+
+    /// Trackpad: action "move" (dx/dy in Mac points), or "down"/"up"/"click".
+    func sendMouse(action: String, button: String = "left", dx: Double = 0, dy: Double = 0) {
+        sendControl(["type": "mouse", "action": action, "button": button, "dx": dx, "dy": dy])
+    }
+
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil) {
         guard let conn = conn ?? connection,
               let payload = try? JSONSerialization.data(withJSONObject: message) else { return }

@@ -8,7 +8,7 @@ Same Wi-Fi is enough. Plug in a Lightning cable for better speed and quality: th
 
 iPhone uses the same project. Pick it as the Xcode destination. The screen is smaller, so an iPad is the useful case. Minimum iOS is **12.0** (`iOS/project.yml` → `deploymentTarget`), tested on iOS 12.5.8.
 
-`iOS/LegacyPadDisplay.xcodeproj` is ready to open. `iOS/project.yml` is the XcodeGen source of truth (`xcodegen generate` after you edit it). The client lives in `iOS/App/` (`VideoReceiver.swift` listens on port 9000, decodes H.264, and sends touch, scroll, and cursor messages). `Mac/` is a git submodule of upstream OpenDisplay, unmodified. The patch lives in `patches/opendisplay-ipad-chooses-mode.patch` and is applied at build time. It adds an optional `mode` field in `hello`, a `standby` message, and redialing remembered Wi-Fi devices that advertise `gate=1`.
+`iOS/LegacyPadDisplay.xcodeproj` is ready to open. `iOS/project.yml` is the XcodeGen source of truth (`xcodegen generate` after you edit it). The client lives in `iOS/App/` (`VideoReceiver.swift` listens on port 9000, decodes H.264, and sends touch, scroll, and cursor messages). `Mac/` is a git submodule of upstream OpenDisplay, unmodified. The patches in `patches/` are applied in order at build time. `01-ipad-chooses-mode.patch` adds an optional `mode` field in `hello`, a `standby` message, and redialing remembered Wi-Fi devices that advertise `gate=1`. `02-keyboard-trackpad.patch` adds `key`, `text` and `mouse` input messages, and input in Mirror mode.
 
 ## Step 0 — Clone with submodules
 
@@ -28,7 +28,7 @@ git submodule update --init --recursive
 To pick Mirror or Extend from the iPad, use the patched app. The prebuilt upstream app still works, but it ignores the iPad's choice and uses its own Mode picker.
 
 - **Patched, built on GitHub (no Xcode):** in this repo's **Actions** tab, run **Build Mac app**. Download `OpenDisplay-patched-mac` from the run's Artifacts, unzip it, and move `OpenDisplay.app` into `/Applications`. The build is ad-hoc signed, so clear the download quarantine before the first launch: `xattr -dr com.apple.quarantine /Applications/OpenDisplay.app`. If the upstream app was installed before, remove its Screen Recording and Accessibility entries and grant them again; each new build needs a fresh grant.
-- **Patched, from source:** `git -C Mac apply ../patches/opendisplay-ipad-chooses-mode.patch`, then `cd Mac && xcodegen generate` and run scheme **OpenSidecarMac** in Xcode.
+- **Patched, from source:** `for p in patches/*.patch; do git -C Mac apply "../$p"; done`, then `cd Mac && xcodegen generate` and run scheme **OpenSidecarMac** in Xcode.
 
 - **Prebuilt (recommended):** download `OpenDisplay.dmg` from the [latest release](https://github.com/peetzweg/opendisplay/releases/latest) and drag `OpenDisplay.app` into `/Applications` before launching. macOS ties Screen Recording and Accessibility to that path. Launching from the disk image, then moving the app, means granting both permissions again, and the volume unmounts on reboot.
 - **From source:** open `Mac/` in Xcode and run it. See [OpenDisplay's build instructions](https://github.com/peetzweg/opendisplay#readme).
@@ -84,6 +84,10 @@ The status changes to **Mac connected · Cable** (or **Wi-Fi**). Tap **Extend** 
 
 While streaming, tap with three fingers to bring up the controls: switch mode, **Stop** (back to the start screen), or **Done**.
 
+The **Keyboard** / **Trackpad** pill (bottom right, drag it anywhere) opens:
+- **Keyboard:** the iPad keyboard, with ⌘ ⌥ ⌃ ⇧ (held for the next key, so ⌘ then C sends Cmd+C), esc, tab, and arrows above it.
+- **Trackpad:** one finger moves the cursor, tap clicks, two-finger tap right-clicks, two-finger drag scrolls. Hold **L** or **R** and move with another finger to drag.
+
 Over Wi-Fi, connect the iPad once from the Mac's device list. After that, the iPad can start a session on its own.
 
 ## If it won't connect
@@ -95,9 +99,9 @@ Over Wi-Fi, connect the iPad once from the Mac's device list. After that, the iP
 
 ## What works / what's missing
 
-Works: video, touch to click and drag, two-finger scroll, a mouse cursor (position and shape), and reconnect when the app returns to the foreground (a short flicker).
+Works: video, touch to click and drag, two-finger scroll, an on-screen keyboard and trackpad, a mouse cursor (position and shape), and reconnect when the app returns to the foreground (a short flicker).
 
-Missing: an external keyboard, automatic rotation to match the virtual display, latency measurement.
+Missing: automatic rotation to match the virtual display, latency measurement.
 
 ## License
 

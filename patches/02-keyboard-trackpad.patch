@@ -1,0 +1,129 @@
+diff --git a/Mac/InputInjector.swift b/Mac/InputInjector.swift
+index e3fef82..be97dc2 100644
+--- a/Mac/InputInjector.swift
++++ b/Mac/InputInjector.swift
+@@ -68,4 +68,89 @@ final class InputInjector {
+                                   wheel3: 0) else { return }
+         event.post(tap: .cghidEventTap)
+     }
++
++    // MARK: - Keyboard and trackpad (the receiver's on-screen panels)
++
++    private var trackpadButton: CGMouseButton?
++
++    /// One key press. `code` is a macOS virtual key code; `modifiers` holds
++    /// "cmd", "opt", "ctrl" and/or "shift".
++    func handleKey(code: Int, modifiers: [String]) {
++        var flags = CGEventFlags()
++        if modifiers.contains("cmd") { flags.insert(.maskCommand) }
++        if modifiers.contains("opt") { flags.insert(.maskAlternate) }
++        if modifiers.contains("ctrl") { flags.insert(.maskControl) }
++        if modifiers.contains("shift") { flags.insert(.maskShift) }
++        for keyDown in [true, false] {
++            guard let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(code),
++                                      keyDown: keyDown) else { return }
++            event.flags = flags
++            event.post(tap: .cghidEventTap)
++        }
++    }
++
++    /// Typed text, posted as Unicode so any character arrives regardless of
++    /// the Mac's keyboard layout.
++    func handleText(_ text: String) {
++        for character in text {
++            let units = Array(String(character).utf16)
++            for keyDown in [true, false] {
++                guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0,
++                                          keyDown: keyDown) else { return }
++                event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
++                event.post(tap: .cghidEventTap)
++            }
++        }
++    }
++
++    /// Trackpad: "move" by dx/dy points from the current cursor position (a
++    /// drag while a button is held), "down"/"up"/"click" for a button.
++    func handleMouse(action: String, button: String, dx: Double, dy: Double) {
++        let current = CGEvent(source: nil)?.location ?? .zero
++        let mouseButton: CGMouseButton = button == "right" ? .right : .left
++        switch action {
++        case "move":
++            let target = Self.clampedToDisplays(CGPoint(x: current.x + dx, y: current.y + dy))
++            let type: CGEventType
++            switch trackpadButton {
++            case .left?: type = .leftMouseDragged
++            case .right?: type = .rightMouseDragged
++            default: type = .mouseMoved
++            }
++            postMouse(type, at: target, button: trackpadButton ?? .left)
++        case "down":
++            trackpadButton = mouseButton
++            postMouse(mouseButton == .right ? .rightMouseDown : .leftMouseDown, at: current, button: mouseButton)
++        case "up":
++            trackpadButton = nil
++            postMouse(mouseButton == .right ? .rightMouseUp : .leftMouseUp, at: current, button: mouseButton)
++        case "click":
++            postMouse(mouseButton == .right ? .rightMouseDown : .leftMouseDown, at: current, button: mouseButton)
++            postMouse(mouseButton == .right ? .rightMouseUp : .leftMouseUp, at: current, button: mouseButton)
++        default:
++            return
++        }
++    }
++
++    private func postMouse(_ type: CGEventType, at point: CGPoint, button: CGMouseButton) {
++        guard let event = CGEvent(mouseEventSource: source, mouseType: type,
++                                  mouseCursorPosition: point, mouseButton: button) else { return }
++        event.setIntegerValueField(.mouseEventClickState, value: 1)
++        event.post(tap: .cghidEventTap)
++    }
++
++    /// Keeps a relative move on screen: inside the display it lands on, or
++    /// at the nearest edge of the display it left.
++    private static func clampedToDisplays(_ point: CGPoint) -> CGPoint {
++        var count: UInt32 = 0
++        CGGetActiveDisplayList(0, nil, &count)
++        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
++        CGGetActiveDisplayList(count, &ids, &count)
++        let screens = ids.map { CGDisplayBounds($0) }
++        if screens.contains(where: { $0.contains(point) }) { return point }
++        let current = CGEvent(source: nil)?.location ?? point
++        guard let home = screens.first(where: { $0.contains(current) }) ?? screens.first else { return point }
++        return CGPoint(x: min(max(point.x, home.minX), home.maxX - 1),
++                       y: min(max(point.y, home.minY), home.maxY - 1))
++    }
+ }
+diff --git a/Mac/MacSender.swift b/Mac/MacSender.swift
+index 8d11255..7bd89f1 100644
+--- a/Mac/MacSender.swift
++++ b/Mac/MacSender.swift
+@@ -293,6 +293,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+                 throw NSError(domain: "MacSender", code: 1,
+                               userInfo: [NSLocalizedDescriptionKey: "no displays found"])
+             }
++            // Input lands on the mirrored (main) display.
++            inputInjector = InputInjector(displayID: display.displayID)
+             // SCDisplay reports points; capture at point resolution for M1.
+             let captureW = (Int(Double(display.width) * quality.scale)) & ~1
+             let captureH = (Int(Double(display.height) * quality.scale)) & ~1
+@@ -1011,6 +1013,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
+                 inputInjector?.handleScroll(dx: dx, dy: dy)
+             }
++        case "key":
++            if let code = obj["code"] as? Int {
++                inputInjector?.handleKey(code: code, modifiers: obj["mods"] as? [String] ?? [])
++            }
++        case "text":
++            if let text = obj["text"] as? String {
++                inputInjector?.handleText(text)
++            }
++        case "mouse":
++            if let action = obj["action"] as? String {
++                inputInjector?.handleMouse(action: action,
++                                           button: obj["button"] as? String ?? "left",
++                                           dx: obj["dx"] as? Double ?? 0,
++                                           dy: obj["dy"] as? Double ?? 0)
++            }
+         case "kf":
+             // The phone's decoder lost sync (e.g. it attached mid-GOP and
+             // periodic keyframes are off) — force an IDR on the next frame.

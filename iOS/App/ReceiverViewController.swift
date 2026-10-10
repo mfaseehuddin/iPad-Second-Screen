@@ -12,12 +12,15 @@ final class VideoContainerView: UIView {
     var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
 }
 
-final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
+final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIGestureRecognizerDelegate {
 
     private let videoView = VideoContainerView()
     private let statusLabel = UILabel()
     private let homeView = HomeView()
     private let controls = ControlsOverlay()
+    private let keyInput = KeyboardInputView()
+    private let trackpad = TrackpadPanel()
+    private let inputToolbar = InputToolbar()
     private var receiver: VideoReceiver!
     private var lastVideoSize: CGSize = .zero
 
@@ -63,6 +66,8 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
             statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
         ])
 
+        setUpInputPanels()
+
         homeView.frame = view.bounds
         homeView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         homeView.onChoose = { [weak self] mode in self?.choose(mode) }
@@ -84,15 +89,69 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
         let scrollPan = UIPanGestureRecognizer(target: self, action: #selector(handleScroll(_:)))
         scrollPan.minimumNumberOfTouches = 2
         scrollPan.maximumNumberOfTouches = 2
+        scrollPan.delegate = self
         view.addGestureRecognizer(scrollPan)
 
         // Three-finger tap while streaming = controls (switch mode / stop).
         let controlsTap = UITapGestureRecognizer(target: self, action: #selector(showControls))
         controlsTap.numberOfTouchesRequired = 3
+        controlsTap.delegate = self
         view.addGestureRecognizer(controlsTap)
 
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground),
                                                 name: UIApplication.willEnterForegroundNotification, object: nil)
+    }
+
+    // MARK: - Keyboard / trackpad
+
+    private func setUpInputPanels() {
+        view.addSubview(keyInput)
+        keyInput.onText = { [weak self] text in self?.receiver.sendText(text) }
+        keyInput.onKey = { [weak self] code, modifiers in self?.receiver.sendKey(code: code, modifiers: modifiers) }
+
+        trackpad.isHidden = true
+        trackpad.onMove = { [weak self] dx, dy in self?.receiver.sendMouse(action: "move", dx: dx, dy: dy) }
+        trackpad.onClick = { [weak self] button in self?.receiver.sendMouse(action: "click", button: button) }
+        trackpad.onButton = { [weak self] button, down in
+            self?.receiver.sendMouse(action: down ? "down" : "up", button: button)
+        }
+        trackpad.onScroll = { [weak self] dx, dy in self?.receiver.sendScroll(dx: dx, dy: dy) }
+        trackpad.onClose = { [weak self] in self?.trackpad.isHidden = true }
+        view.addSubview(trackpad)
+
+        inputToolbar.onKeyboard = { [weak self] in
+            guard let self = self else { return }
+            if self.keyInput.isFirstResponder {
+                self.keyInput.resignFirstResponder()
+            } else {
+                self.keyInput.becomeFirstResponder()
+            }
+        }
+        inputToolbar.onTrackpad = { [weak self] in
+            guard let self = self else { return }
+            self.trackpad.isHidden.toggle()
+        }
+        view.addSubview(inputToolbar)
+    }
+
+    private var panelsPlaced = false
+
+    /// First layout: toolbar bottom-right, trackpad bottom-left. After that
+    /// they stay wherever the user dragged them.
+    private func placeInputPanelsIfNeeded() {
+        guard !panelsPlaced, view.bounds.width > 0 else { return }
+        panelsPlaced = true
+        let safe = view.bounds.inset(by: view.safeAreaInsets)
+        inputToolbar.center = CGPoint(x: safe.maxX - inputToolbar.bounds.width / 2 - 16,
+                                      y: safe.maxY - inputToolbar.bounds.height / 2 - 16)
+        trackpad.center = CGPoint(x: safe.minX + trackpad.bounds.width / 2 + 16,
+                                  y: safe.maxY - trackpad.bounds.height / 2 - 16)
+    }
+
+    // Stream-wide gestures (scroll, three-finger tap) only for touches on
+    // the video itself, not on the panels floating over it.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        touch.view === view || touch.view === videoView
     }
 
     // MARK: - Mode selection
@@ -127,7 +186,12 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
         homeView.isHidden = streaming
         homeView.link = link
         homeView.pendingMode = streaming ? nil : activeMode
-        if !streaming { controls.isHidden = true }
+        if !streaming {
+            controls.isHidden = true
+            trackpad.isHidden = true
+            keyInput.resignFirstResponder()
+        }
+        inputToolbar.isHidden = !streaming
         cursorLayer.isHidden = !streaming || !cursorVisible || cursorLayer.contents == nil
         // Mid-stream drop (app switch, cable pulled): keep the last frame
         // up and say so, rather than flashing back to the home screen.
@@ -144,6 +208,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        placeInputPanelsIfNeeded()
         announcePanel()
         updateCursorLayout()
     }
