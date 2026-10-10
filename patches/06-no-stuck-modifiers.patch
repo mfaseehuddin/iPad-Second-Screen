@@ -1,0 +1,66 @@
+Modification of OpenDisplay (https://github.com/peetzweg/opendisplay),
+Copyright (c) 2026 Philip Poloczek, licensed under GPL-3.0 (see Mac/LICENSE).
+Modified 2026-10-11 for iPad-Second-Screen. This patch is likewise GPL-3.0.
+
+Fixes left clicks arriving as right clicks after a shortcut: macOS kept
+the last key event's modifiers as held, so later clicks became ⌃-clicks.
+Injected mouse, scroll and text events now carry no modifiers, and
+modifiers are released after each shortcut.
+
+diff --git a/Mac/InputInjector.swift b/Mac/InputInjector.swift
+index 0e018c6..d15a4af 100644
+--- a/Mac/InputInjector.swift
++++ b/Mac/InputInjector.swift
+@@ -53,6 +53,7 @@ final class InputInjector {
+         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                   mouseCursorPosition: point, mouseButton: .left) else { return }
+         event.setIntegerValueField(.mouseEventClickState, value: 1)
++        event.flags = []   // see postMouse
+         event.post(tap: .cghidEventTap)
+     }
+ 
+@@ -66,6 +67,7 @@ final class InputInjector {
+                                   wheel1: Int32((dy / scale).rounded()),
+                                   wheel2: Int32((dx / scale).rounded()),
+                                   wheel3: 0) else { return }
++        event.flags = []   // a stale ⌃ would turn scrolling into zoom
+         event.post(tap: .cghidEventTap)
+     }
+ 
+@@ -90,6 +92,18 @@ final class InputInjector {
+             event.flags = flags
+             event.post(tap: .cghidEventTap)
+         }
++        // macOS keeps the modifiers of the last posted event as "held", and
++        // later events from this source inherit them: after ⌃→ every click
++        // would arrive as ⌃-click, i.e. a right click. Release them.
++        if !modifiers.isEmpty || (123...126).contains(code) { releaseModifiers() }
++    }
++
++    /// Posts a flags-changed event with no modifiers, so nothing stays held.
++    private func releaseModifiers() {
++        guard let event = CGEvent(keyboardEventSource: source, virtualKey: 59, keyDown: false) else { return }
++        event.type = .flagsChanged
++        event.flags = []
++        event.post(tap: .cghidEventTap)
+     }
+ 
+     /// Typed text, posted as Unicode so any character arrives regardless of
+@@ -101,6 +115,7 @@ final class InputInjector {
+                 guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0,
+                                           keyDown: keyDown) else { return }
+                 event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
++                event.flags = []
+                 event.post(tap: .cghidEventTap)
+             }
+         }
+@@ -139,6 +154,9 @@ final class InputInjector {
+         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                   mouseCursorPosition: point, mouseButton: button) else { return }
+         event.setIntegerValueField(.mouseEventClickState, value: 1)
++        // Never inherit modifiers: a ⌃ macOS still thinks is held would make
++        // this a ⌃-click, which macOS treats as a right click.
++        event.flags = []
+         event.post(tap: .cghidEventTap)
+     }
+ 
