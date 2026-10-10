@@ -59,6 +59,8 @@ protocol VideoReceiverDelegate: AnyObject {
     func videoReceiver(_ receiver: VideoReceiver, macStatusDidChange battery: Int?, charging: Bool, onAC: Bool)
     /// Text copied on the Mac.
     func videoReceiver(_ receiver: VideoReceiver, clipboardDidArrive text: String)
+    /// The Mac's screen locked or unlocked (capture pauses while locked).
+    func videoReceiver(_ receiver: VideoReceiver, macLockDidChange locked: Bool)
 }
 
 final class VideoReceiver {
@@ -364,6 +366,13 @@ final class VideoReceiver {
         }
     }
 
+    private func reportLock(_ locked: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.delegate?.videoReceiver(self, macLockDidChange: locked)
+        }
+    }
+
     private func resetStreamState() {
         buffer.removeAll(keepingCapacity: true)
         formatDesc = nil
@@ -486,7 +495,11 @@ final class VideoReceiver {
             if let sent = obj["t"] as? Double {
                 rttMs = Date().timeIntervalSince1970 * 1000 - sent
             }
+        case "macLock":
+            guard let locked = obj["locked"] as? Bool else { return }
+            reportLock(locked)
         case "macStatus":
+            if let locked = obj["locked"] as? Bool { reportLock(locked) }
             let battery = obj["battery"] as? Int
             let charging = obj["charging"] as? Bool ?? false
             let onAC = obj["onAC"] as? Bool ?? (battery == nil)

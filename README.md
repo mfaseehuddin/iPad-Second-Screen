@@ -152,6 +152,14 @@ While streaming:
 
 Two-finger scroll and pinch-to-zoom work in every mode.
 
+**Tap to drag.** On the trackpad, or on the picture in Trackpad mode: tap, then touch again and move to drag, like macOS's "tap to drag". Lift to drop.
+
+**Momentum scrolling.** Flick to scroll (two fingers, or the scroll strip), and the page keeps going and slows to a stop. Touch again to stop it.
+
+**Edge swipes.** Swipe in from the left edge to open the keyboard and trackpad, or down from the top edge for the controls. Touches that start right at those edges never click on the Mac.
+
+**Lock screen.** When the Mac locks, the picture pauses and the iPad says so. Type your Mac password there to unlock it, or tap **Wake display**. The password is typed as key presses and never stored. macOS may block typed input at the lock screen; if Unlock does nothing, that's why.
+
 **Scrolling without gestures.** Slide one finger along the strip at the trackpad's right edge, or hold **▲** / **▼** in the macro bar. Holding scrolls faster the longer you hold.
 
 **Status bar.** Shows the Mac's and the iPad's battery, latency, and fps. It says *idle* when the Mac screen is still, because the Mac only sends frames when something changes. It turns red when either battery is at 15% or less and not charging, even if the status bar is switched off. You can turn the warning off in Settings.

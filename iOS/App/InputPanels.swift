@@ -31,6 +31,22 @@ enum MacKeyCode {
         "f9": 101, "f10": 109, "f11": 103, "f12": 111,
     ]
 
+    private static let shiftedCharacters: [Character: Character] = [
+        "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8",
+        "(": "9", ")": "0", "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";",
+        "\"": "'", "<": ",", ">": ".", "?": "/", "~": "`",
+    ]
+
+    /// The key press that types `character` on a US layout: key code, and
+    /// whether Shift is needed. nil for characters off the US keyboard.
+    static func keystroke(for character: Character) -> (code: Int, shift: Bool)? {
+        if character == " " { return (space, false) }
+        if let base = shiftedCharacters[character], let code = characters[base] { return (code, true) }
+        let lower = Character(String(character).lowercased())
+        guard let code = characters[lower] else { return nil }
+        return (code, lower != character)
+    }
+
     /// Key code for a single character ("p", "4", "/") or a key name
     /// ("esc", "f5", "pageup"). nil if unknown.
     static func code(for key: String) -> Int? {
@@ -64,6 +80,128 @@ func clickButton(forTwoFingerTap gesture: UIGestureRecognizer) -> String {
 func pointerDelta(_ t: CGPoint) -> (Double, Double) {
     let gain = (1.5 + min(Double(hypot(t.x, t.y)) / 6, 3)) * AppSettings.shared.trackpadSpeed
     return (Double(t.x) * gain, Double(t.y) * gain)
+}
+
+/// Keeps a flicked scroll going and slows it to a stop, like macOS.
+final class MomentumScroller {
+
+    var onScroll: ((Double, Double) -> Void)?
+
+    private var velocity = CGPoint.zero
+    private var displayLink: CADisplayLink?
+    private var lastTimestamp: CFTimeInterval = 0
+
+    /// `velocity`: in scroll units per second (the same units the gesture sent).
+    func start(velocity: CGPoint) {
+        stop()
+        guard AppSettings.shared.momentumScrolling, hypot(velocity.x, velocity.y) > 200 else { return }
+        self.velocity = velocity
+        lastTimestamp = 0
+        let link = CADisplayLink(target: self, selector: #selector(step(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    @objc private func step(_ link: CADisplayLink) {
+        let dt = lastTimestamp == 0 ? 1.0 / 60 : link.timestamp - lastTimestamp
+        lastTimestamp = link.timestamp
+        let decay = CGFloat(pow(0.95, dt * 60))
+        velocity = CGPoint(x: velocity.x * decay, y: velocity.y * decay)
+        guard hypot(velocity.x, velocity.y) > 40 else { stop(); return }
+        onScroll?(Double(velocity.x) * dt, Double(velocity.y) * dt)
+    }
+}
+
+/// Shown while the Mac is locked: explains the paused picture and offers to
+/// type the Mac password into the lock screen.
+final class LockPanel: PanelView, UITextFieldDelegate {
+
+    var onUnlock: ((String) -> Void)?
+    var onWake: (() -> Void)?
+
+    private let passwordField = UITextField()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = UIColor(white: 0, alpha: 0.55)
+
+        let card = UIView()
+        card.backgroundColor = UIColor(white: 0.12, alpha: 0.96)
+        card.layer.cornerRadius = 18
+        card.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(card)
+
+        let title = UILabel()
+        title.text = "Your Mac is locked"
+        title.font = .systemFont(ofSize: 22, weight: .semibold)
+        title.textColor = .white
+        let message = UILabel()
+        message.text = "The picture is paused until it's unlocked. Type your Mac password to unlock it from here. If nothing happens, macOS is blocking typed input at the lock screen on this Mac."
+        message.font = .systemFont(ofSize: 14)
+        message.textColor = UIColor(white: 1, alpha: 0.6)
+        message.numberOfLines = 0
+
+        passwordField.isSecureTextEntry = true
+        passwordField.placeholder = "Mac password"
+        passwordField.borderStyle = .roundedRect
+        passwordField.autocorrectionType = .no
+        passwordField.autocapitalizationType = .none
+        passwordField.returnKeyType = .go
+        passwordField.delegate = self
+
+        let unlock = UIButton(type: .system)
+        unlock.setTitle("Unlock", for: .normal)
+        unlock.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        unlock.addTarget(self, action: #selector(unlockTapped), for: .touchUpInside)
+        let wake = UIButton(type: .system)
+        wake.setTitle("Wake display", for: .normal)
+        wake.titleLabel?.font = .systemFont(ofSize: 17)
+        wake.addTarget(self, action: #selector(wakeTapped), for: .touchUpInside)
+        let buttons = UIStackView(arrangedSubviews: [wake, unlock])
+        buttons.distribution = .fillEqually
+
+        let stack = UIStackView(arrangedSubviews: [title, message, passwordField, buttons])
+        stack.axis = .vertical
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+        NSLayoutConstraint.activate([
+            card.centerXAnchor.constraint(equalTo: centerXAnchor),
+            card.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 60),
+            card.widthAnchor.constraint(equalToConstant: 420),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
+            passwordField.heightAnchor.constraint(equalToConstant: 44),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func dismissKeyboard() {
+        passwordField.resignFirstResponder()
+        passwordField.text = nil
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        unlockTapped()
+        return false
+    }
+
+    @objc private func unlockTapped() {
+        let password = passwordField.text ?? ""
+        passwordField.text = nil   // never kept
+        guard !password.isEmpty else { return }
+        onUnlock?(password)
+    }
+
+    @objc private func wakeTapped() { onWake?() }
 }
 
 private func overlayButton(_ title: String) -> UIButton {
@@ -655,6 +793,10 @@ private final class TrackpadView: UIView {
     var padOpacity: CGFloat = 0.4 { didSet { restyle() } }
 
     private let pad = UIView()
+    private let momentum = MomentumScroller()
+    // Tap, then touch again within this window and move: drag (tap-to-drag).
+    private var lastTapAt = Date.distantPast
+    private var tapDragging = false
     // Slide one finger along this right-edge strip to scroll, like the
     // scroll zone on old laptop trackpads.
     private let scrollStrip = UIView()
@@ -679,6 +821,7 @@ private final class TrackpadView: UIView {
             grip.tag = 100 + index
             scrollStrip.addSubview(grip)
         }
+        momentum.onScroll = { [weak self] dx, dy in self?.onScroll?(dx, dy) }
         let stripPan = UIPanGestureRecognizer(target: self, action: #selector(stripScrolled(_:)))
         stripPan.maximumNumberOfTouches = 1
         scrollStrip.addGestureRecognizer(stripPan)
@@ -737,33 +880,73 @@ private final class TrackpadView: UIView {
     func releaseButtons() {
         heldButtons.forEach { onButton?($0, false) }
         heldButtons.removeAll()
+        if tapDragging {
+            tapDragging = false
+            onButton?("left", false)
+        }
+        momentum.stop()
     }
 
     @objc private func moved(_ gesture: UIPanGestureRecognizer) {
-        guard gesture.state == .changed else { return }
-        let t = gesture.translation(in: pad)
-        gesture.setTranslation(.zero, in: pad)
-        let (dx, dy) = pointerDelta(t)
-        onMove?(dx, dy)
+        switch gesture.state {
+        case .began:
+            momentum.stop()
+            if AppSettings.shared.tapToDrag, Date().timeIntervalSince(lastTapAt) < 0.5 {
+                tapDragging = true
+                onButton?("left", true)
+            }
+        case .changed:
+            let t = gesture.translation(in: pad)
+            gesture.setTranslation(.zero, in: pad)
+            let (dx, dy) = pointerDelta(t)
+            onMove?(dx, dy)
+        default:
+            if tapDragging {
+                tapDragging = false
+                onButton?("left", false)
+            }
+        }
     }
 
     @objc private func stripScrolled(_ gesture: UIPanGestureRecognizer) {
-        guard gesture.state == .changed else { return }
-        let t = gesture.translation(in: scrollStrip)
-        gesture.setTranslation(.zero, in: scrollStrip)
-        let sign: Double = AppSettings.shared.naturalScrolling ? 1 : -1
-        onScroll?(0, Double(t.y) * 3 * sign)
+        let sign: CGFloat = AppSettings.shared.naturalScrolling ? 1 : -1
+        switch gesture.state {
+        case .began:
+            momentum.stop()
+        case .changed:
+            let t = gesture.translation(in: scrollStrip)
+            gesture.setTranslation(.zero, in: scrollStrip)
+            onScroll?(0, Double(t.y * 3 * sign))
+        case .ended:
+            let v = gesture.velocity(in: scrollStrip)
+            momentum.start(velocity: CGPoint(x: 0, y: v.y * 3 * sign))
+        default:
+            break
+        }
     }
 
     @objc private func scrolled(_ gesture: UIPanGestureRecognizer) {
-        guard gesture.state == .changed else { return }
-        let t = gesture.translation(in: pad)
-        gesture.setTranslation(.zero, in: pad)
-        let sign: Double = AppSettings.shared.naturalScrolling ? 1 : -1
-        onScroll?(Double(t.x) * 2 * sign, Double(t.y) * 2 * sign)
+        let sign: CGFloat = AppSettings.shared.naturalScrolling ? 1 : -1
+        switch gesture.state {
+        case .began:
+            momentum.stop()
+        case .changed:
+            let t = gesture.translation(in: pad)
+            gesture.setTranslation(.zero, in: pad)
+            onScroll?(Double(t.x * 2 * sign), Double(t.y * 2 * sign))
+        case .ended:
+            let v = gesture.velocity(in: pad)
+            momentum.start(velocity: CGPoint(x: v.x * 2 * sign, y: v.y * 2 * sign))
+        default:
+            break
+        }
     }
 
-    @objc private func tapped() { onClick?("left") }
+    @objc private func tapped() {
+        momentum.stop()
+        lastTapAt = Date()
+        onClick?("left")
+    }
     @objc private func twoFingerTapped(_ gesture: UITapGestureRecognizer) {
         onClick?(clickButton(forTwoFingerTap: gesture))
     }

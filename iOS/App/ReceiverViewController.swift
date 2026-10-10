@@ -52,6 +52,18 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
 
     // Picture-as-trackpad gestures, active only in that touch mode.
     private var pictureTrackpadGestures: [UIGestureRecognizer] = []
+    private var lastPictureTapAt = Date.distantPast
+    private var pictureTapDragging = false
+    private let pictureMomentum = MomentumScroller()
+
+    // Edge swipes, and a touch that started on an edge (never a click).
+    private let leftEdgeSwipe = UIScreenEdgePanGestureRecognizer()
+    private let topEdgeSwipe = UIScreenEdgePanGestureRecognizer()
+    private var edgeTouch = false
+
+    // Lock screen.
+    private let lockPanel = LockPanel()
+    private var macLocked = false
 
     // Settings that need more than a relayout when they change.
     private var appliedQuality = AppSettings.shared.quality
@@ -136,7 +148,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         receiver.delegate = self
         let settings = AppSettings.shared
         receiver.setQuality(settings.quality.rawValue)
-        receiver.subscribe(clipboard: settings.syncClipboard, status: settings.showStatusBar)
+        receiver.subscribe(clipboard: settings.syncClipboard, status: true)
         if settings.autoStart, let mode = settings.lastMode { choose(mode) }
 
         // Pinch the picture to zoom (iPad only); two-finger double-tap resets.
@@ -163,6 +175,24 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
             gesture.delegate = self
             view.addGestureRecognizer(gesture)
         }
+
+        pictureMomentum.onScroll = { [weak self] dx, dy in self?.receiver.sendScroll(dx: dx, dy: dy) }
+
+        leftEdgeSwipe.edges = .left
+        leftEdgeSwipe.addTarget(self, action: #selector(leftEdgeSwiped(_:)))
+        topEdgeSwipe.edges = .top
+        topEdgeSwipe.addTarget(self, action: #selector(topEdgeSwiped(_:)))
+        for gesture in [leftEdgeSwipe, topEdgeSwipe] {
+            gesture.delegate = self
+            view.addGestureRecognizer(gesture)
+        }
+
+        lockPanel.frame = view.bounds
+        lockPanel.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        lockPanel.isHidden = true
+        lockPanel.onUnlock = { [weak self] password in self?.typePassword(password) }
+        lockPanel.onWake = { [weak self] in self?.wakeMac() }
+        view.insertSubview(lockPanel, belowSubview: controls)
 
         UIDevice.current.isBatteryMonitoringEnabled = true
         for name in [UIDevice.batteryLevelDidChangeNotification, UIDevice.batteryStateDidChangeNotification] {
@@ -219,6 +249,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     }
 
     @objc private func settingsChanged() {
+        setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
         let settings = AppSettings.shared
         if settings.quality != appliedQuality {
             appliedQuality = settings.quality
@@ -229,7 +260,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
             appliedDisplaySize = settings.displaySize
             announcePanel()
         }
-        receiver.subscribe(clipboard: settings.syncClipboard, status: settings.showStatusBar)
+        receiver.subscribe(clipboard: settings.syncClipboard, status: true)
         if !settings.pinchToZoom { setZoom(1, animated: false) }
         inputOverlay.applySettings()
         UIViewController.attemptRotationToDeviceOrientation()
@@ -292,7 +323,15 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         touch.view === view || touch.view === videoView || touch.view === videoClip
     }
 
+    override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge {
+        // Our top-edge swipe first; a second swipe still opens iOS's own.
+        AppSettings.shared.edgeSwipes ? .top : []
+    }
+
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        let edges = AppSettings.shared.edgeSwipes && pictureInputAllowed && lockPanel.isHidden
+        if gestureRecognizer === leftEdgeSwipe { return edges && !docked && !overlayShown }
+        if gestureRecognizer === topEdgeSwipe { return edges }
         if pictureTrackpadGestures.contains(gestureRecognizer) {
             return pictureInputAllowed && pictureMode == .trackpad
         }
@@ -318,15 +357,76 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     }
 
     @objc private func pictureMoved(_ gesture: UIPanGestureRecognizer) {
-        guard gesture.state == .changed else { return }
-        let t = gesture.translation(in: view)
-        gesture.setTranslation(.zero, in: view)
-        let (dx, dy) = pointerDelta(t)
-        receiver.sendMouse(action: "move", dx: dx, dy: dy)
+        switch gesture.state {
+        case .began:
+            pictureMomentum.stop()
+            // Tap, then touch again and move: drag.
+            if AppSettings.shared.tapToDrag, Date().timeIntervalSince(lastPictureTapAt) < 0.5 {
+                pictureTapDragging = true
+                receiver.sendMouse(action: "down", button: "left")
+            }
+        case .changed:
+            let t = gesture.translation(in: view)
+            gesture.setTranslation(.zero, in: view)
+            let (dx, dy) = pointerDelta(t)
+            receiver.sendMouse(action: "move", dx: dx, dy: dy)
+        default:
+            if pictureTapDragging {
+                pictureTapDragging = false
+                receiver.sendMouse(action: "up", button: "left")
+            }
+        }
     }
 
     @objc private func pictureTapped() {
+        pictureMomentum.stop()
+        lastPictureTapAt = Date()
         receiver.sendMouse(action: "click", button: "left")
+    }
+
+    // MARK: - Edge swipes
+
+    @objc private func leftEdgeSwiped(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard gesture.state == .ended, gesture.translation(in: view).x > 40 else { return }
+        setOverlay(shown: true)
+    }
+
+    @objc private func topEdgeSwiped(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard gesture.state == .ended, gesture.translation(in: view).y > 40 else { return }
+        showControls()
+    }
+
+    /// Touches starting within this distance of the left or top edge are
+    /// kept for edge swipes and never click on the Mac.
+    private func startsOnEdge(_ touches: Set<UITouch>) -> Bool {
+        guard AppSettings.shared.edgeSwipes, let point = touches.first?.location(in: view) else { return false }
+        return point.x < 20 || point.y < 20
+    }
+
+    // MARK: - Lock screen
+
+    /// Nudges the pointer, which wakes a sleeping display and the login field.
+    private func wakeMac() {
+        receiver.sendMouse(action: "move", dx: 1, dy: 0)
+        receiver.sendMouse(action: "move", dx: -1, dy: 0)
+    }
+
+    /// Wakes the lock screen, then types the password as US-layout key
+    /// presses (characters off that layout as text) and presses return.
+    /// The password is not stored.
+    private func typePassword(_ password: String) {
+        wakeMac()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self = self else { return }
+            for character in password {
+                if let key = MacKeyCode.keystroke(for: character) {
+                    self.receiver.sendKey(code: key.code, modifiers: key.shift ? ["shift"] : [])
+                } else {
+                    self.receiver.sendText(String(character))
+                }
+            }
+            self.receiver.sendKey(code: MacKeyCode.returnKey, modifiers: [])
+        }
     }
 
     @objc private func pictureRightTapped(_ gesture: UITapGestureRecognizer) {
@@ -528,6 +628,12 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         inputOverlay.showsHideButton = !docked
         overlayToggle.isHidden = !streaming || overlayShown || docked
         cursorLayer.isHidden = !streaming || !cursorVisible || cursorLayer.contents == nil
+        // Also before the first frame: a Mac locked at connect never sends one.
+        let showLock = activeMode != nil && link != nil && macLocked
+        if lockPanel.isHidden == showLock {
+            lockPanel.isHidden = !showLock
+            if !showLock { lockPanel.dismissKeyboard() }
+        }
         // The low-battery warning shows even with the status bar turned off.
         statusBar.isHidden = !streaming || !(AppSettings.shared.showStatusBar || lowBattery)
             || statusBar.text?.isEmpty != false
@@ -599,18 +705,27 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        pictureMomentum.stop()
+        if startsOnEdge(touches) {
+            edgeTouch = true
+            return
+        }
         forwardTouch(touches, phase: "began")
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         // A second finger means a pinch or scroll, not a drag on the Mac.
-        guard (event?.allTouches?.count ?? 1) < 2 else { return }
+        guard !edgeTouch, (event?.allTouches?.count ?? 1) < 2 else { return }
         forwardTouch(touches, phase: "moved")
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if edgeTouch {
+            edgeTouch = false
+            return
+        }
         forwardTouch(touches, phase: "ended")
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        forwardTouch(touches, phase: "ended")
+        touchesEnded(touches, with: event)
     }
 
     /// Maps a raw touch point into [0,1] video space, accounting for the
@@ -656,11 +771,21 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
 
     @objc private func handleScroll(_ gesture: UIPanGestureRecognizer) {
         // Two-finger scroll works in every picture touch mode.
-        guard pictureInputAllowed, gesture.state == .changed else { return }
-        let translation = gesture.translation(in: view)
-        gesture.setTranslation(.zero, in: view)
-        let sign: Double = AppSettings.shared.naturalScrolling ? 1 : -1
-        receiver.sendScroll(dx: Double(translation.x) * sign, dy: Double(translation.y) * sign)
+        guard pictureInputAllowed else { return }
+        let sign: CGFloat = AppSettings.shared.naturalScrolling ? 1 : -1
+        switch gesture.state {
+        case .began:
+            pictureMomentum.stop()
+        case .changed:
+            let translation = gesture.translation(in: view)
+            gesture.setTranslation(.zero, in: view)
+            receiver.sendScroll(dx: Double(translation.x * sign), dy: Double(translation.y * sign))
+        case .ended:
+            let v = gesture.velocity(in: view)
+            pictureMomentum.start(velocity: CGPoint(x: v.x * sign, y: v.y * sign))
+        default:
+            break
+        }
     }
 
     // MARK: - VideoReceiverDelegate
@@ -710,6 +835,12 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         macCharging = charging
         macOnAC = onAC
         updateStatusBar()
+    }
+
+    func videoReceiver(_ receiver: VideoReceiver, macLockDidChange locked: Bool) {
+        guard locked != macLocked else { return }
+        macLocked = locked
+        updateScreen()
     }
 
     func videoReceiver(_ receiver: VideoReceiver, clipboardDidArrive text: String) {

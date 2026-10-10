@@ -174,6 +174,24 @@ final class AppSettings {
         set { set(newValue, "overlayTrackpad") }
     }
 
+    /// Tap, then touch again and move to drag (like macOS "tap to drag").
+    var tapToDrag: Bool {
+        get { bool("tapToDrag", true) }
+        set { set(newValue, "tapToDrag") }
+    }
+
+    /// A flicked scroll keeps going and slows to a stop.
+    var momentumScrolling: Bool {
+        get { bool("momentumScrolling", true) }
+        set { set(newValue, "momentumScrolling") }
+    }
+
+    /// Swipe in from the left edge for the overlay, from the top for controls.
+    var edgeSwipes: Bool {
+        get { bool("edgeSwipes", true) }
+        set { set(newValue, "edgeSwipes") }
+    }
+
     var lowBatteryWarning: Bool {
         get { bool("lowBatteryWarning", true) }
         set { set(newValue, "lowBatteryWarning") }
@@ -290,9 +308,10 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section)! {
-        case .overlay, .trackpad: return 2
+        case .overlay: return 2
+        case .trackpad: return 4
         case .about: return 1
-        case .touch: return 2
+        case .touch: return 3
         case .portrait: return PortraitLayout.allCases.count
         case .display: return 5
         case .zoom: return 2
@@ -414,6 +433,14 @@ final class SettingsViewController: UITableViewController {
             return SliderCell(title: "Speed", value: settings.trackpadSpeed, range: 0.5...2.5) { [weak self] in
                 self?.settings.trackpadSpeed = $0
             }
+        case (.trackpad, 2):
+            return SwitchCell(title: "Tap to drag", isOn: settings.tapToDrag) { [weak self] in
+                self?.settings.tapToDrag = $0
+            }
+        case (.trackpad, 3):
+            return SwitchCell(title: "Momentum scrolling", isOn: settings.momentumScrolling) { [weak self] in
+                self?.settings.momentumScrolling = $0
+            }
         case (.trackpad, _):
             return SwitchCell(title: "Natural scrolling", isOn: settings.naturalScrolling) { [weak self] in
                 self?.settings.naturalScrolling = $0
@@ -422,6 +449,10 @@ final class SettingsViewController: UITableViewController {
             return SegmentCell(title: "Picture", items: PictureTouch.allCases.map { $0.title },
                                selected: PictureTouch.allCases.firstIndex(of: settings.pictureTouch) ?? 0) { [weak self] in
                 self?.settings.pictureTouch = PictureTouch.allCases[$0]
+            }
+        case (.touch, 1):
+            return SwitchCell(title: "Edge swipes (left: keyboard & trackpad, top: controls)", isOn: settings.edgeSwipes) { [weak self] in
+                self?.settings.edgeSwipes = $0
             }
         case (.touch, _):
             return SwitchCell(title: "Warn when a battery is low", isOn: settings.lowBatteryWarning) { [weak self] in
