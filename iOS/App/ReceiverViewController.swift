@@ -47,7 +47,11 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // Status bar contents.
     private var macBattery: Int?
     private var macCharging = false
+    private var macOnAC = true
     private var statsText = ""
+
+    // Picture-as-trackpad gestures, active only in that touch mode.
+    private var pictureTrackpadGestures: [UIGestureRecognizer] = []
 
     // Settings that need more than a relayout when they change.
     private var appliedQuality = AppSettings.shared.quality
@@ -145,6 +149,26 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         resetZoom.delegate = self
         view.addGestureRecognizer(resetZoom)
 
+        // Picture as a trackpad (Settings → Touch → Picture).
+        let pictureMove = UIPanGestureRecognizer(target: self, action: #selector(pictureMoved(_:)))
+        pictureMove.maximumNumberOfTouches = 1
+        let pictureTap = UITapGestureRecognizer(target: self, action: #selector(pictureTapped))
+        let pictureRightTap = UITapGestureRecognizer(target: self, action: #selector(pictureRightTapped))
+        pictureRightTap.numberOfTouchesRequired = 2
+        pictureRightTap.require(toFail: resetZoom)
+        let pictureSwipe = UIPanGestureRecognizer(target: self, action: #selector(pictureSwiped(_:)))
+        pictureSwipe.minimumNumberOfTouches = 3
+        pictureTrackpadGestures = [pictureMove, pictureTap, pictureRightTap, pictureSwipe]
+        for gesture in pictureTrackpadGestures {
+            gesture.delegate = self
+            view.addGestureRecognizer(gesture)
+        }
+
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        for name in [UIDevice.batteryLevelDidChangeNotification, UIDevice.batteryStateDidChangeNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(batteryChanged), name: name, object: nil)
+        }
+
         UIApplication.shared.isIdleTimerDisabled = true
 
         // Two-finger pan = scroll (like a trackpad).
@@ -177,6 +201,10 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         inputOverlay.onScroll = { [weak self] dx, dy in self?.receiver.sendScroll(dx: dx, dy: dy) }
         inputOverlay.onSettings = { [weak self] in self?.showSettings() }
         inputOverlay.onHide = { [weak self] in self?.setOverlay(shown: false) }
+        inputOverlay.onLayoutChange = { [weak self] in
+            self?.view.setNeedsLayout()
+            self?.updateScreen()
+        }
         view.addSubview(inputOverlay)
 
         overlayToggle.addTarget(self, action: #selector(toggleTapped), for: .touchUpInside)
@@ -240,10 +268,12 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
             setVideoFrame(CGRect(x: 0, y: safe.minY, width: view.bounds.width,
                                  height: (view.bounds.width * aspect).rounded()))
             let top = videoClip.frame.maxY + 6
-            inputOverlay.frame = CGRect(x: safe.minX, y: top, width: safe.width, height: safe.maxY - top)
+            let height = inputOverlay.preferredHeight(full: safe.maxY - top)
+            inputOverlay.frame = CGRect(x: safe.minX, y: top, width: safe.width, height: height)
         } else {
             setVideoFrame(view.bounds)
-            let height = (view.bounds.height * CGFloat(AppSettings.shared.overlayHeight)).rounded()
+            let full = (view.bounds.height * CGFloat(AppSettings.shared.overlayHeight)).rounded()
+            let height = inputOverlay.preferredHeight(full: full)
             inputOverlay.frame = CGRect(x: safe.minX, y: safe.maxY - height, width: safe.width, height: height)
         }
         overlayToggle.center = CGPoint(x: safe.maxX - overlayToggle.bounds.width / 2 - 10,
@@ -263,10 +293,54 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if pictureTrackpadGestures.contains(gestureRecognizer) {
+            return pictureInputAllowed && pictureMode == .trackpad
+        }
         if gestureRecognizer is UIPinchGestureRecognizer {
             return AppSettings.shared.pinchToZoom && activeMode != nil && receivingVideo
         }
         return true
+    }
+
+    // MARK: - Picture touch modes
+
+    /// Streaming, with no controls sheet in the way.
+    private var pictureInputAllowed: Bool {
+        activeMode != nil && receivingVideo && controls.isHidden
+    }
+
+    /// What a touch on the picture does right now.
+    private var pictureMode: PictureTouch {
+        let setting = AppSettings.shared.pictureTouch
+        guard setting == .automatic else { return setting }
+        let overlayOpen = !inputOverlay.isHidden
+        return overlayOpen && !inputOverlay.showsTrackpad ? .trackpad : .direct
+    }
+
+    @objc private func pictureMoved(_ gesture: UIPanGestureRecognizer) {
+        guard gesture.state == .changed else { return }
+        let t = gesture.translation(in: view)
+        gesture.setTranslation(.zero, in: view)
+        let (dx, dy) = pointerDelta(t)
+        receiver.sendMouse(action: "move", dx: dx, dy: dy)
+    }
+
+    @objc private func pictureTapped() {
+        receiver.sendMouse(action: "click", button: "left")
+    }
+
+    @objc private func pictureRightTapped() {
+        receiver.sendMouse(action: "click", button: "right")
+    }
+
+    /// Three-finger swipe: desktops, Mission Control, app windows (like the trackpad).
+    @objc private func pictureSwiped(_ gesture: UIPanGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+        let t = gesture.translation(in: view)
+        guard max(abs(t.x), abs(t.y)) > 30 else { return }
+        let code = abs(t.x) > abs(t.y) ? (t.x < 0 ? MacKeyCode.right : MacKeyCode.left)
+                                       : (t.y < 0 ? MacKeyCode.up : MacKeyCode.down)
+        receiver.sendKey(code: code, modifiers: ["ctrl"])
     }
 
     // MARK: - Zoom (iPad only)
@@ -353,11 +427,37 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
                                  width: width, height: height)
     }
 
+    @objc private func batteryChanged() {
+        updateStatusBar()
+        updateScreen()
+    }
+
+    /// iPad battery percent, nil when unknown (e.g. the simulator).
+    private var iPadBattery: Int? {
+        let level = UIDevice.current.batteryLevel
+        return level < 0 ? nil : Int((level * 100).rounded())
+    }
+
+    private var iPadCharging: Bool {
+        [.charging, .full].contains(UIDevice.current.batteryState)
+    }
+
+    /// A battery at 15% or less that isn't charging.
+    private var lowBattery: Bool {
+        guard AppSettings.shared.lowBatteryWarning else { return false }
+        let macLow = macBattery.map { $0 <= 15 && !macCharging && !macOnAC } ?? false
+        let iPadLow = iPadBattery.map { $0 <= 15 && !iPadCharging } ?? false
+        return macLow || iPadLow
+    }
+
     private func updateStatusBar() {
         var parts: [String] = []
         if let battery = macBattery { parts.append("Mac \(battery)%" + (macCharging ? " ⚡︎" : "")) }
+        if let battery = iPadBattery { parts.append("iPad \(battery)%" + (iPadCharging ? " ⚡︎" : "")) }
         if !statsText.isEmpty { parts.append(statsText) }
-        statusBar.text = parts.joined(separator: "  ·  ")
+        statusBar.text = (lowBattery ? "⚠︎ Low battery  ·  " : "") + parts.joined(separator: "  ·  ")
+        statusBar.backgroundColor = lowBattery ? UIColor(red: 0.75, green: 0.1, blue: 0.1, alpha: 0.85)
+                                               : UIColor(white: 0, alpha: 0.45)
         layoutStatusBar()
     }
 
@@ -428,7 +528,9 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         inputOverlay.showsHideButton = !docked
         overlayToggle.isHidden = !streaming || overlayShown || docked
         cursorLayer.isHidden = !streaming || !cursorVisible || cursorLayer.contents == nil
-        statusBar.isHidden = !streaming || !AppSettings.shared.showStatusBar || statusBar.text?.isEmpty != false
+        // The low-battery warning shows even with the status bar turned off.
+        statusBar.isHidden = !streaming || !(AppSettings.shared.showStatusBar || lowBattery)
+            || statusBar.text?.isEmpty != false
         updateClipboardTimer(streaming: streaming)
         if !streaming, zoomScale > 1 { setZoom(1, animated: false) }
         // Mid-stream drop (app switch, cable pulled): keep the last frame
@@ -493,7 +595,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // MARK: - Touch -> "touch" control messages
 
     private var forwardingInput: Bool {
-        activeMode != nil && receivingVideo && controls.isHidden && AppSettings.shared.directTouch
+        pictureInputAllowed && pictureMode == .direct
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -553,10 +655,12 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // MARK: - Two-finger scroll -> "scroll" control messages
 
     @objc private func handleScroll(_ gesture: UIPanGestureRecognizer) {
-        guard forwardingInput, gesture.state == .changed else { return }
+        // Two-finger scroll works in every picture touch mode.
+        guard pictureInputAllowed, gesture.state == .changed else { return }
         let translation = gesture.translation(in: view)
         gesture.setTranslation(.zero, in: view)
-        receiver.sendScroll(dx: Double(translation.x), dy: Double(translation.y))
+        let sign: Double = AppSettings.shared.naturalScrolling ? 1 : -1
+        receiver.sendScroll(dx: Double(translation.x) * sign, dy: Double(translation.y) * sign)
     }
 
     // MARK: - VideoReceiverDelegate
@@ -595,8 +699,8 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         updateCursorLayout()
     }
 
-    func videoReceiver(_ receiver: VideoReceiver, statsDidChange rttMs: Double?, fps: Int) {
-        statsText = (rttMs.map { "\(Int($0.rounded())) ms  ·  " } ?? "") + "\(fps) fps"
+    func videoReceiver(_ receiver: VideoReceiver, statsDidChange rttMs: Double?, fps: Int?) {
+        statsText = (rttMs.map { "\(Int($0.rounded())) ms  ·  " } ?? "") + (fps.map { "\($0) fps" } ?? "idle")
         updateStatusBar()
         updateScreen()
     }
@@ -604,6 +708,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     func videoReceiver(_ receiver: VideoReceiver, macStatusDidChange battery: Int?, charging: Bool, onAC: Bool) {
         macBattery = battery
         macCharging = charging
+        macOnAC = onAC
         updateStatusBar()
     }
 

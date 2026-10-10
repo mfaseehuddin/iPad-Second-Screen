@@ -49,6 +49,14 @@ class PanelView: UIView {
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
 }
 
+/// Pointer acceleration for relative moves: slow moves stay precise, fast
+/// flicks cross the whole Mac screen. Shared by the trackpad panel and the
+/// picture in trackpad mode.
+func pointerDelta(_ t: CGPoint) -> (Double, Double) {
+    let gain = (1.5 + min(Double(hypot(t.x, t.y)) / 6, 3)) * AppSettings.shared.trackpadSpeed
+    return (Double(t.x) * gain, Double(t.y) * gain)
+}
+
 private func overlayButton(_ title: String) -> UIButton {
     let button = UIButton(type: .system)
     button.setTitle(title, for: .normal)
@@ -89,9 +97,27 @@ final class InputOverlay: PanelView {
     var onSettings: (() -> Void)?
     var onHide: (() -> Void)?
 
+    /// Fired when the Keyboard / Trackpad switches change what's shown.
+    var onLayoutChange: (() -> Void)?
+
     private let macroBar = MacroBar()
     private let keyboard = MacKeyboardView()
     private let trackpad = TrackpadView()
+    private static let barHeight: CGFloat = 40
+
+    var showsKeyboard: Bool { AppSettings.shared.overlayKeyboard }
+    var showsTrackpad: Bool { AppSettings.shared.overlayTrackpad }
+
+    /// Height the overlay wants, given the height it would have with both
+    /// panels: the macro bar alone, a short trackpad band, or the full size.
+    func preferredHeight(full: CGFloat) -> CGFloat {
+        let bar = Self.barHeight + 8
+        switch (showsKeyboard, showsTrackpad) {
+        case (false, false): return bar
+        case (false, true): return bar + 6 + min(220, max(140, (full - bar) * 0.55))
+        default: return full
+        }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -100,6 +126,12 @@ final class InputOverlay: PanelView {
         macroBar.onSettings = { [weak self] in self?.onSettings?() }
         macroBar.onHide = { [weak self] in self?.onHide?() }
         macroBar.onButton = { [weak self] button, down in self?.onButton?(button, down) }
+        macroBar.onScroll = { [weak self] dx, dy in self?.onScroll?(dx, dy) }
+        macroBar.onPanelsChanged = { [weak self] in
+            self?.releaseAll()
+            self?.setNeedsLayout()
+            self?.onLayoutChange?()
+        }
         trackpad.onMove = { [weak self] dx, dy in self?.onMove?(dx, dy) }
         trackpad.onClick = { [weak self] button in self?.onClick?(button) }
         trackpad.onButton = { [weak self] button, down in self?.onButton?(button, down) }
@@ -136,14 +168,25 @@ final class InputOverlay: PanelView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let area = bounds.inset(by: UIEdgeInsets(top: 0, left: 8, bottom: 8, right: 8))
-        let barHeight: CGFloat = 40
+        let barHeight = Self.barHeight
         macroBar.frame = CGRect(x: area.minX, y: area.minY, width: area.width, height: barHeight)
         let body = CGRect(x: area.minX, y: area.minY + barHeight + 6,
-                          width: area.width, height: area.height - barHeight - 6)
-        let keyboardWidth = (body.width - 8) * 0.75
-        keyboard.frame = CGRect(x: body.minX, y: body.minY, width: keyboardWidth, height: body.height)
-        trackpad.frame = CGRect(x: body.minX + keyboardWidth + 8, y: body.minY,
-                                width: body.width - keyboardWidth - 8, height: body.height)
+                          width: area.width, height: max(0, area.height - barHeight - 6))
+        keyboard.isHidden = !showsKeyboard
+        trackpad.isHidden = !showsTrackpad
+        switch (showsKeyboard, showsTrackpad) {
+        case (true, true):
+            let keyboardWidth = (body.width - 8) * 0.75
+            keyboard.frame = CGRect(x: body.minX, y: body.minY, width: keyboardWidth, height: body.height)
+            trackpad.frame = CGRect(x: body.minX + keyboardWidth + 8, y: body.minY,
+                                    width: body.width - keyboardWidth - 8, height: body.height)
+        case (true, false):
+            keyboard.frame = body
+        case (false, true):
+            trackpad.frame = body
+        case (false, false):
+            break
+        }
     }
 }
 
@@ -178,6 +221,17 @@ private final class MacroBar: UIView {
     var macros: [Macro] = [] { didSet { rebuild() } }
     var buttonOpacity: CGFloat = 0.4 { didSet { restyle() } }
     var showsHide = true { didSet { hideButton.isHidden = !showsHide; setNeedsLayout() } }
+    /// Scroll by dx/dy while ▲ / ▼ is held (stream scroll sign).
+    var onScroll: ((Double, Double) -> Void)?
+    /// The Keyboard / Trackpad switches changed (stored in AppSettings).
+    var onPanelsChanged: (() -> Void)?
+
+    // Hold to scroll; speeds up the longer it's held.
+    private let scrollUp = overlayButton("▲")
+    private let scrollDown = overlayButton("▼")
+    private var scrollTimer: Timer?
+    private let keyboardSwitch = overlayButton("Keyboard")
+    private let trackpadSwitch = overlayButton("Trackpad")
 
     // Left-hand mouse buttons, so the left thumb clicks while the right hand
     // is on the trackpad. Hold one and move on the trackpad to drag.
@@ -211,6 +265,19 @@ private final class MacroBar: UIView {
                              for: [.touchUpInside, .touchUpOutside, .touchCancel])
             addSubview(button)
         }
+        for (button, direction) in [(scrollUp, 1), (scrollDown, -1)] {
+            button.tag = direction
+            button.layer.borderWidth = 1
+            button.layer.borderColor = UIColor(white: 1, alpha: 0.18).cgColor
+            button.addTarget(self, action: #selector(scrollDown(_:)), for: .touchDown)
+            button.addTarget(self, action: #selector(scrollUp(_:)),
+                             for: [.touchUpInside, .touchUpOutside, .touchCancel])
+            addSubview(button)
+        }
+        keyboardSwitch.addTarget(self, action: #selector(toggleKeyboard), for: .touchUpInside)
+        trackpadSwitch.addTarget(self, action: #selector(toggleTrackpad), for: .touchUpInside)
+        addSubview(keyboardSwitch)
+        addSubview(trackpadSwitch)
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
@@ -232,8 +299,17 @@ private final class MacroBar: UIView {
         hideButton.frame = CGRect(x: bounds.maxX - hideWidth, y: 0, width: hideWidth, height: bounds.height)
         settingsButton.frame = CGRect(x: bounds.maxX - hideWidth - (showsHide ? 6 : 0) - settingsWidth, y: 0,
                                       width: settingsWidth, height: bounds.height)
-        let scrollX = rightClick.frame.maxX + 12
-        scroll.frame = CGRect(x: scrollX, y: 0, width: settingsButton.frame.minX - 10 - scrollX,
+        let trackpadWidth = trackpadSwitch.intrinsicContentSize.width
+        trackpadSwitch.frame = CGRect(x: settingsButton.frame.minX - 6 - trackpadWidth, y: 0,
+                                      width: trackpadWidth, height: bounds.height)
+        let keyboardWidth = keyboardSwitch.intrinsicContentSize.width
+        keyboardSwitch.frame = CGRect(x: trackpadSwitch.frame.minX - 6 - keyboardWidth, y: 0,
+                                      width: keyboardWidth, height: bounds.height)
+        let arrowWidth: CGFloat = 44
+        scrollUp.frame = CGRect(x: rightClick.frame.maxX + 12, y: 0, width: arrowWidth, height: bounds.height)
+        scrollDown.frame = CGRect(x: scrollUp.frame.maxX + 6, y: 0, width: arrowWidth, height: bounds.height)
+        let scrollX = scrollDown.frame.maxX + 12
+        scroll.frame = CGRect(x: scrollX, y: 0, width: max(0, keyboardSwitch.frame.minX - 10 - scrollX),
                               height: bounds.height)
     }
 
@@ -250,9 +326,44 @@ private final class MacroBar: UIView {
 
     private func restyle() {
         let background = UIColor(white: 0.08, alpha: buttonOpacity)
-        for case let button as UIButton in row.arrangedSubviews + [settingsButton, hideButton, leftClick, rightClick] {
+        for case let button as UIButton in row.arrangedSubviews
+            + [settingsButton, hideButton, leftClick, rightClick, scrollUp, scrollDown] {
             button.backgroundColor = background
         }
+        let settings = AppSettings.shared
+        for (button, on) in [(keyboardSwitch, settings.overlayKeyboard), (trackpadSwitch, settings.overlayTrackpad)] {
+            button.backgroundColor = on ? UIColor(red: 0.04, green: 0.52, blue: 1, alpha: max(buttonOpacity, 0.6))
+                                        : background
+        }
+    }
+
+    @objc private func toggleKeyboard() {
+        AppSettings.shared.overlayKeyboard.toggle()
+        restyle()
+        onPanelsChanged?()
+    }
+
+    @objc private func toggleTrackpad() {
+        AppSettings.shared.overlayTrackpad.toggle()
+        restyle()
+        onPanelsChanged?()
+    }
+
+    @objc private func scrollDown(_ button: UIButton) {
+        let direction = Double(button.tag)   // +1 = ▲ (towards the top), -1 = ▼
+        var ticks = 0
+        scrollTimer?.invalidate()
+        onScroll?(0, 30 * direction)
+        scrollTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            ticks += 1
+            guard ticks > 5 else { return }   // short pause before repeating
+            self?.onScroll?(0, min(30 + Double(ticks) * 3, 160) * direction)
+        }
+    }
+
+    @objc private func scrollUp(_ button: UIButton) {
+        scrollTimer?.invalidate()
+        scrollTimer = nil
     }
 
     @objc private func macroTapped(_ button: UIButton) { onMacro?(macros[button.tag]) }
@@ -272,7 +383,10 @@ private final class MacroBar: UIView {
     func releaseButtons() {
         heldButtons.forEach { onButton?($0, false) }
         heldButtons.removeAll()
+        scrollTimer?.invalidate()
+        scrollTimer = nil
     }
+
     @objc private func settingsTapped() { onSettings?() }
     @objc private func hideTapped() { onHide?() }
 }
@@ -532,6 +646,9 @@ private final class TrackpadView: UIView {
     var padOpacity: CGFloat = 0.4 { didSet { restyle() } }
 
     private let pad = UIView()
+    // Slide one finger along this right-edge strip to scroll, like the
+    // scroll zone on old laptop trackpads.
+    private let scrollStrip = UIView()
     private var pinchSteps = 0
     private let left = overlayButton("L")
     private let right = overlayButton("R")
@@ -544,6 +661,19 @@ private final class TrackpadView: UIView {
         pad.layer.borderWidth = 1
         pad.layer.borderColor = UIColor(white: 1, alpha: 0.18).cgColor
         addSubview(pad)
+        scrollStrip.layer.cornerRadius = 10
+        scrollStrip.layer.borderWidth = 1
+        scrollStrip.layer.borderColor = UIColor(white: 1, alpha: 0.18).cgColor
+        for index in 0..<3 {
+            let grip = UIView()
+            grip.backgroundColor = UIColor(white: 1, alpha: 0.4)
+            grip.tag = 100 + index
+            scrollStrip.addSubview(grip)
+        }
+        let stripPan = UIPanGestureRecognizer(target: self, action: #selector(stripScrolled(_:)))
+        stripPan.maximumNumberOfTouches = 1
+        scrollStrip.addGestureRecognizer(stripPan)
+        addSubview(scrollStrip)
         for (button, name) in [(left, "left"), (right, "right")] {
             button.accessibilityIdentifier = name
             button.addTarget(self, action: #selector(buttonDown(_:)), for: .touchDown)
@@ -572,7 +702,14 @@ private final class TrackpadView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let buttonHeight = min(48, bounds.height * 0.2)
-        pad.frame = CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height - buttonHeight - 6)
+        let stripWidth: CGFloat = 34
+        let padHeight = bounds.height - buttonHeight - 6
+        pad.frame = CGRect(x: 0, y: 0, width: bounds.width - stripWidth - 6, height: padHeight)
+        scrollStrip.frame = CGRect(x: pad.frame.maxX + 6, y: 0, width: stripWidth, height: padHeight)
+        for index in 0..<3 {
+            scrollStrip.viewWithTag(100 + index)?.frame = CGRect(x: 10, y: padHeight / 2 - 8 + CGFloat(index) * 7,
+                                                                  width: stripWidth - 20, height: 2)
+        }
         let half = (bounds.width - 6) / 2
         left.frame = CGRect(x: 0, y: pad.frame.maxY + 6, width: half, height: buttonHeight)
         right.frame = CGRect(x: half + 6, y: pad.frame.maxY + 6, width: half, height: buttonHeight)
@@ -580,6 +717,7 @@ private final class TrackpadView: UIView {
 
     private func restyle() {
         pad.backgroundColor = UIColor(white: 0.08, alpha: padOpacity * 0.8)
+        scrollStrip.backgroundColor = UIColor(white: 0.08, alpha: padOpacity)
         for button in [left, right] {
             button.backgroundColor = UIColor(white: 0.08, alpha: padOpacity)
             button.layer.borderWidth = 1
@@ -596,10 +734,16 @@ private final class TrackpadView: UIView {
         guard gesture.state == .changed else { return }
         let t = gesture.translation(in: pad)
         gesture.setTranslation(.zero, in: pad)
-        // Pointer acceleration: slow moves stay precise, fast flicks cross
-        // the whole Mac screen from a narrow pad.
-        let gain = (1.5 + min(Double(hypot(t.x, t.y)) / 6, 3)) * AppSettings.shared.trackpadSpeed
-        onMove?(Double(t.x) * gain, Double(t.y) * gain)
+        let (dx, dy) = pointerDelta(t)
+        onMove?(dx, dy)
+    }
+
+    @objc private func stripScrolled(_ gesture: UIPanGestureRecognizer) {
+        guard gesture.state == .changed else { return }
+        let t = gesture.translation(in: scrollStrip)
+        gesture.setTranslation(.zero, in: scrollStrip)
+        let sign: Double = AppSettings.shared.naturalScrolling ? 1 : -1
+        onScroll?(0, Double(t.y) * 3 * sign)
     }
 
     @objc private func scrolled(_ gesture: UIPanGestureRecognizer) {

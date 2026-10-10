@@ -51,8 +51,10 @@ protocol VideoReceiverDelegate: AnyObject {
     func videoReceiver(_ receiver: VideoReceiver, cursorDidChange point: CGPoint, visible: Bool)
     /// anchor/normSize normalized against the Mac's captured display (see MacSender.pollCursorImage).
     func videoReceiver(_ receiver: VideoReceiver, cursorImageDidChange image: UIImage, anchor: CGPoint, normSize: CGSize)
-    /// Round trip to the Mac in ms (nil until measured) and decoded frames per second.
-    func videoReceiver(_ receiver: VideoReceiver, statsDidChange rttMs: Double?, fps: Int)
+    /// Round trip to the Mac in ms (nil until measured) and frames per second
+    /// over the last few seconds; fps is nil while the Mac screen is still
+    /// (the Mac only sends a frame when something changes).
+    func videoReceiver(_ receiver: VideoReceiver, statsDidChange rttMs: Double?, fps: Int?)
     /// Mac battery percent (nil without a battery), charging, and on mains power.
     func videoReceiver(_ receiver: VideoReceiver, macStatusDidChange battery: Int?, charging: Bool, onAC: Bool)
     /// Text copied on the Mac.
@@ -94,6 +96,7 @@ final class VideoReceiver {
     private var wantsStatus = false
     private var framesSinceStats = 0
     private var lastStatsAt = Date()
+    private var recentSamples: [(frames: Int, seconds: Double)] = []
     private var rttMs: Double?
 
     // Panel size announced to the Mac in "hello" so it can size the virtual
@@ -340,8 +343,13 @@ final class VideoReceiver {
     /// Every watchdog tick: frames per second since the last tick, and a ping
     /// whose pong gives the round trip.
     private func reportStats() {
-        let elapsed = Date().timeIntervalSince(lastStatsAt)
-        let fps = elapsed > 0 ? Int((Double(framesSinceStats) / elapsed).rounded()) : 0
+        // Average over the last two ticks (~4 s) so the number doesn't jump,
+        // and call it idle when nothing arrived in the latest tick.
+        recentSamples.append((framesSinceStats, Date().timeIntervalSince(lastStatsAt)))
+        if recentSamples.count > 2 { recentSamples.removeFirst() }
+        let frames = recentSamples.reduce(0) { $0 + $1.frames }
+        let seconds = recentSamples.reduce(0) { $0 + $1.seconds }
+        let fps: Int? = framesSinceStats == 0 || seconds <= 0 ? nil : Int((Double(frames) / seconds).rounded())
         framesSinceStats = 0
         lastStatsAt = Date()
         if helloSent, connection?.state == .ready {

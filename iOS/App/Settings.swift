@@ -76,6 +76,27 @@ enum DisplaySize: String, CaseIterable {
     }
 }
 
+/// What a touch on the Mac picture does.
+enum PictureTouch: String, CaseIterable {
+    /// Trackpad while the overlay is open with its trackpad hidden, else direct.
+    case automatic
+    /// Click where you tap.
+    case direct
+    /// The whole picture is a trackpad: drag moves the pointer, tap clicks.
+    case trackpad
+    /// Ignore touches on the picture (scroll and zoom still work).
+    case off
+
+    var title: String {
+        switch self {
+        case .automatic: return "Auto"
+        case .direct: return "Click"
+        case .trackpad: return "Trackpad"
+        case .off: return "Off"
+        }
+    }
+}
+
 /// What happens when the iPad is held upright.
 enum PortraitLayout: String, CaseIterable {
     case gameBoy, rotate, landscape
@@ -133,10 +154,29 @@ final class AppSettings {
         set { set(newValue, "naturalScrolling") }
     }
 
-    /// Touching the picture clicks there on the Mac. Off = trackpad only.
-    var directTouch: Bool {
-        get { bool("directTouch", true) }
-        set { set(newValue, "directTouch") }
+    var pictureTouch: PictureTouch {
+        get {
+            if let stored = PictureTouch(rawValue: defaults.string(forKey: "pictureTouch") ?? "") { return stored }
+            // Earlier builds had an on/off "Tap the picture to click".
+            return bool("directTouch", true) ? .automatic : .off
+        }
+        set { set(newValue.rawValue, "pictureTouch") }
+    }
+
+    /// The overlay's Keyboard / Trackpad switches.
+    var overlayKeyboard: Bool {
+        get { bool("overlayKeyboard", true) }
+        set { set(newValue, "overlayKeyboard") }
+    }
+
+    var overlayTrackpad: Bool {
+        get { bool("overlayTrackpad", true) }
+        set { set(newValue, "overlayTrackpad") }
+    }
+
+    var lowBatteryWarning: Bool {
+        get { bool("lowBatteryWarning", true) }
+        set { set(newValue, "lowBatteryWarning") }
     }
 
     var portraitLayout: PortraitLayout {
@@ -251,7 +291,8 @@ final class SettingsViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section)! {
         case .overlay, .trackpad: return 2
-        case .touch, .about: return 1
+        case .about: return 1
+        case .touch: return 2
         case .portrait: return PortraitLayout.allCases.count
         case .display: return 5
         case .zoom: return 2
@@ -285,7 +326,7 @@ final class SettingsViewController: UITableViewController {
         case .zoom:
             return "Pinch the picture with two fingers to zoom in on the iPad; double-tap with two fingers to zoom back out. The Mac is unaffected."
         case .touch:
-            return "Turn this off to drive the Mac only with the trackpad, so a stray touch on the picture never clicks. Handy with the Mac closed (clamshell)."
+            return "Click: tap where you want to click. Trackpad: drag anywhere on the picture to move the pointer, tap to click, two-finger tap to right-click. Auto: Trackpad while the overlay is open with its trackpad switched off, Click otherwise. Off: touches on the picture do nothing (two-finger scroll and pinch still work)."
         case .macros:
             return "Shortcuts shown above the keyboard. ⌃← / ⌃→ switch desktops when Mission Control's shortcuts are enabled on the Mac. Swipe left on your own macros to delete them."
         default:
@@ -377,9 +418,14 @@ final class SettingsViewController: UITableViewController {
             return SwitchCell(title: "Natural scrolling", isOn: settings.naturalScrolling) { [weak self] in
                 self?.settings.naturalScrolling = $0
             }
+        case (.touch, 0):
+            return SegmentCell(title: "Picture", items: PictureTouch.allCases.map { $0.title },
+                               selected: PictureTouch.allCases.firstIndex(of: settings.pictureTouch) ?? 0) { [weak self] in
+                self?.settings.pictureTouch = PictureTouch.allCases[$0]
+            }
         case (.touch, _):
-            return SwitchCell(title: "Tap the picture to click", isOn: settings.directTouch) { [weak self] in
-                self?.settings.directTouch = $0
+            return SwitchCell(title: "Warn when a battery is low", isOn: settings.lowBatteryWarning) { [weak self] in
+                self?.settings.lowBatteryWarning = $0
             }
         case (.macros, let row) where row == Macro.all.count:
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)

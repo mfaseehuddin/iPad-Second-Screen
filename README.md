@@ -131,7 +131,7 @@ While streaming:
 
 | Do this | To |
 | --- | --- |
-| Tap / drag on the picture | Click / drag there (turn off in Settings for trackpad-only use) |
+| Tap / drag on the picture | Click / drag there, or move the pointer like a trackpad (see *Picture touch* below) |
 | Two-finger drag on the picture | Scroll |
 | Pinch the picture / two-finger double-tap | Zoom in on the iPad / zoom back out |
 | Arrow, bottom-right corner | Open the keyboard and trackpad overlay |
@@ -141,6 +141,20 @@ While streaming:
 **Keyboard.** Modifiers work two ways. You can hold ⌘ while tapping C. Or tap ⌘ once, and it lights up for the next key only. Tap a lit modifier again to cancel it. Delete, space and the arrow keys repeat while held. Keys are sent as Mac key codes, so the Mac's keyboard layout decides which character you get, just like a real keyboard.
 
 **Trackpad.** One finger moves the pointer, with acceleration. Tap to click, two-finger tap to right-click, two-finger drag to scroll. To drag, hold **L** and move with another finger. There's a second pair of **L** / **R** buttons at the left end of the macro bar, so your left thumb can click while your right hand is on the trackpad.
+
+**Keyboard and Trackpad switches.** The macro bar's **Keyboard** and **Trackpad** buttons show or hide each panel. With only the trackpad, the overlay shrinks to a short bar. With neither, only the macro bar is left.
+
+**Picture touch.** Settings → Touch → Picture:
+- **Click:** tap where you want to click.
+- **Trackpad:** drag anywhere on the picture to move the pointer, tap to click, two-finger tap to right-click, three-finger swipe for desktops and Mission Control.
+- **Auto** (default): Trackpad while the overlay is open with its trackpad switched off, Click otherwise.
+- **Off:** touches on the picture do nothing.
+
+Two-finger scroll and pinch-to-zoom work in every mode.
+
+**Scrolling without gestures.** Slide one finger along the strip at the trackpad's right edge, or hold **▲** / **▼** in the macro bar. Holding scrolls faster the longer you hold.
+
+**Status bar.** Shows the Mac's and the iPad's battery, latency, and fps. It says *idle* when the Mac screen is still, because the Mac only sends frames when something changes. It turns red when either battery is at 15% or less and not charging, even if the status bar is switched off. You can turn the warning off in Settings.
 
 **Trackpad gestures.** Three-finger swipe left or right switches desktops (⌃→ / ⌃←), swipe up opens Mission Control, swipe down shows the app's windows. Pinch on the trackpad zooms in apps (⌘+ / ⌘−).
 
