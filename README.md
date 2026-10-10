@@ -171,7 +171,7 @@ Two-finger scroll and pinch-to-zoom work in every mode.
 
 Use **Extend**, not Mirror. Mirror shows the Mac's own screen, and that screen turns off when the lid closes. In Extend, the iPad's display becomes the main display once the built-in one goes away.
 
-1. Start **Extend** and check that the keyboard and trackpad work.
+1. Start **Extend** and check that the keyboard and trackpad work. If you'll turn the iPad upright, pick **Picture on top, keyboard below** in Settings. It keeps the Mac display in landscape, so rotating never rebuilds the Mac's only screen. "Turn the Mac display upright" also works with the lid closed: the Mac builds the new display before removing the old one, but it takes a few seconds.
 2. In Settings on the iPad, turn off **Tap the picture to click** if you'll drive the Mac only with the trackpad.
 3. Keep the Mac awake with the lid closed. macOS only stays awake in clamshell when it detects a real external display, and a virtual one may not count. To be sure, turn sleep off (and turn it back on with `0` when you're done):
 

@@ -7,6 +7,7 @@
 | `01-ipad-chooses-mode.patch` | `hello` may carry `mode` (`extend` / `mirror`), which overrides the Mac's Mode picker for that device. The new `standby` message ends the session, and the Mac dials again so the device can start the next one. Remembered Wi-Fi devices advertising `gate=1` are dialed at any time. |
 | `02-keyboard-trackpad.patch` | New `key`, `text` and `mouse` messages, injected with the existing Accessibility permission. Input also works in Mirror mode. |
 | `03-quality-clipboard-status.patch` | `hello` may carry `quality` (`best` / `balanced` / `fast`). A receiver that sends `subscribe` gets two-way clipboard sync (`clipboard` messages, text only) and/or a `macStatus` message with battery and power every 15 s. |
+| `04-greedy-connection.patch` | Keeps the session alive with the lid closed. When the device rotates, the new display is built before the old one is removed, so the Mac always has a screen. Failed rebuilds retry on the same connection, and a device that's still reachable is dialed again when its session ends or fails to start. |
 
 Apply them yourself with:
 
