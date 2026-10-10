@@ -22,6 +22,7 @@ private enum Palette {
 final class HomeView: UIView {
 
     var onChoose: ((DisplayMode) -> Void)?
+    var onSettings: (() -> Void)?
 
     /// nil = no Mac connected yet.
     var link: ReceiverLink? { didSet { updateStatus() } }
@@ -93,6 +94,18 @@ final class HomeView: UIView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
+        let settings = UIButton(type: .system)
+        settings.setTitle("Settings", for: .normal)
+        settings.tintColor = Palette.secondaryText
+        settings.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+        settings.addTarget(self, action: #selector(settingsTapped), for: .touchUpInside)
+        settings.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(settings)
+        NSLayoutConstraint.activate([
+            settings.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 16),
+            settings.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -20),
+        ])
+
         detailLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Palette.waiting
         detailLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -118,6 +131,10 @@ final class HomeView: UIView {
 
     @objc private func tileTapped(_ tile: ModeTile) {
         onChoose?(tile.mode)
+    }
+
+    @objc private func settingsTapped() {
+        onSettings?()
     }
 
     private func updateStatus() {
@@ -152,7 +169,7 @@ final class HomeView: UIView {
         } else if link == nil {
             hintLabel.text = "Plug in the cable, or keep OpenDisplay open on a Mac on the same Wi-Fi."
         } else {
-            hintLabel.text = "While streaming, tap with three fingers for controls."
+            hintLabel.text = "While streaming, the arrow at the bottom right opens the keyboard and trackpad. Tap with three fingers for controls."
         }
     }
 }
@@ -256,6 +273,7 @@ final class ControlsOverlay: UIView, UIGestureRecognizerDelegate {
 
     var onChoose: ((DisplayMode) -> Void)?
     var onStop: (() -> Void)?
+    var onSettings: (() -> Void)?
 
     var mode: DisplayMode = .extend {
         didSet { modePicker.selectedSegmentIndex = mode == .extend ? 0 : 1 }
@@ -289,7 +307,13 @@ final class ControlsOverlay: UIView, UIGestureRecognizerDelegate {
         done.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         done.addTarget(self, action: #selector(dismiss), for: .touchUpInside)
 
-        let row = UIStackView(arrangedSubviews: [modePicker, stop, done])
+        let settings = UIButton(type: .system)
+        settings.setTitle("Settings", for: .normal)
+        settings.tintColor = .white
+        settings.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        settings.addTarget(self, action: #selector(settingsTapped), for: .touchUpInside)
+
+        let row = UIStackView(arrangedSubviews: [modePicker, settings, stop, done])
         row.spacing = 24
         row.alignment = .center
         row.translatesAutoresizingMaskIntoConstraints = false
@@ -332,6 +356,11 @@ final class ControlsOverlay: UIView, UIGestureRecognizerDelegate {
         mode = chosen
         onChoose?(chosen)
         dismiss()
+    }
+
+    @objc private func settingsTapped() {
+        dismiss()
+        onSettings?()
     }
 
     @objc private func stopTapped() {

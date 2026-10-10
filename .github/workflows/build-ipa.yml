@@ -1,5 +1,6 @@
-# Builds an unsigned LegacyPadDisplay.ipa on a GitHub macOS runner, so no
-# local Xcode is needed. Sign and install it with Sideloadly (README, Step 2).
+# Builds LegacyPadDisplay.ipa on a GitHub macOS runner, so no local Xcode is
+# needed: an unsigned IPA for Sideloadly, and a fake-signed one for jailbroken
+# devices with AppSync Unified (README, "Install the iPad app").
 name: Build unsigned IPA
 
 on:
@@ -35,7 +36,17 @@ jobs:
           cp -R build/Release-iphoneos/LegacyPadDisplay.app Payload/
           zip -qry LegacyPadDisplay.ipa Payload
 
+      # For jailbroken devices with AppSync Unified: a pseudo-signature
+      # (no certificate) that installs without the 7-day expiry.
+      - name: Package fake-signed IPA
+        run: |
+          brew install ldid
+          ldid -S Payload/LegacyPadDisplay.app/LegacyPadDisplay
+          zip -qry LegacyPadDisplay-fakesigned.ipa Payload
+
       - uses: actions/upload-artifact@v4
         with:
           name: LegacyPadDisplay-ipa
-          path: LegacyPadDisplay.ipa
+          path: |
+            LegacyPadDisplay.ipa
+            LegacyPadDisplay-fakesigned.ipa

@@ -18,9 +18,9 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     private let statusLabel = UILabel()
     private let homeView = HomeView()
     private let controls = ControlsOverlay()
-    private let keyInput = KeyboardInputView()
-    private let trackpad = TrackpadPanel()
-    private let inputToolbar = InputToolbar()
+    private let inputOverlay = InputOverlay()
+    private let overlayToggle = OverlayToggleButton()
+    private var overlayShown = false
     private var receiver: VideoReceiver!
     private var lastVideoSize: CGSize = .zero
 
@@ -71,6 +71,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         homeView.frame = view.bounds
         homeView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         homeView.onChoose = { [weak self] mode in self?.choose(mode) }
+        homeView.onSettings = { [weak self] in self?.showSettings() }
         view.addSubview(homeView)
 
         controls.frame = view.bounds
@@ -78,6 +79,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         controls.isHidden = true
         controls.onChoose = { [weak self] mode in self?.choose(mode) }
         controls.onStop = { [weak self] in self?.stopStreaming() }
+        controls.onSettings = { [weak self] in self?.showSettings() }
         view.addSubview(controls)
 
         receiver = VideoReceiver(displayLayer: videoView.displayLayer)
@@ -105,47 +107,66 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // MARK: - Keyboard / trackpad
 
     private func setUpInputPanels() {
-        view.addSubview(keyInput)
-        keyInput.onText = { [weak self] text in self?.receiver.sendText(text) }
-        keyInput.onKey = { [weak self] code, modifiers in self?.receiver.sendKey(code: code, modifiers: modifiers) }
-
-        trackpad.isHidden = true
-        trackpad.onMove = { [weak self] dx, dy in self?.receiver.sendMouse(action: "move", dx: dx, dy: dy) }
-        trackpad.onClick = { [weak self] button in self?.receiver.sendMouse(action: "click", button: button) }
-        trackpad.onButton = { [weak self] button, down in
+        inputOverlay.isHidden = true
+        inputOverlay.onKey = { [weak self] code, modifiers in self?.receiver.sendKey(code: code, modifiers: modifiers) }
+        inputOverlay.onMove = { [weak self] dx, dy in self?.receiver.sendMouse(action: "move", dx: dx, dy: dy) }
+        inputOverlay.onClick = { [weak self] button in self?.receiver.sendMouse(action: "click", button: button) }
+        inputOverlay.onButton = { [weak self] button, down in
             self?.receiver.sendMouse(action: down ? "down" : "up", button: button)
         }
-        trackpad.onScroll = { [weak self] dx, dy in self?.receiver.sendScroll(dx: dx, dy: dy) }
-        trackpad.onClose = { [weak self] in self?.trackpad.isHidden = true }
-        view.addSubview(trackpad)
+        inputOverlay.onScroll = { [weak self] dx, dy in self?.receiver.sendScroll(dx: dx, dy: dy) }
+        inputOverlay.onSettings = { [weak self] in self?.showSettings() }
+        inputOverlay.onHide = { [weak self] in self?.setOverlay(shown: false) }
+        view.addSubview(inputOverlay)
 
-        inputToolbar.onKeyboard = { [weak self] in
-            guard let self = self else { return }
-            if self.keyInput.isFirstResponder {
-                self.keyInput.resignFirstResponder()
-            } else {
-                self.keyInput.becomeFirstResponder()
-            }
-        }
-        inputToolbar.onTrackpad = { [weak self] in
-            guard let self = self else { return }
-            self.trackpad.isHidden.toggle()
-        }
-        view.addSubview(inputToolbar)
+        overlayToggle.addTarget(self, action: #selector(toggleTapped), for: .touchUpInside)
+        view.addSubview(overlayToggle)
+
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
+                                               name: AppSettings.didChange, object: nil)
     }
 
-    private var panelsPlaced = false
+    @objc private func toggleTapped() {
+        setOverlay(shown: true)
+    }
 
-    /// First layout: toolbar bottom-right, trackpad bottom-left. After that
-    /// they stay wherever the user dragged them.
-    private func placeInputPanelsIfNeeded() {
-        guard !panelsPlaced, view.bounds.width > 0 else { return }
-        panelsPlaced = true
+    @objc private func settingsChanged() {
+        inputOverlay.applySettings()
+        view.setNeedsLayout()
+    }
+
+    private func setOverlay(shown: Bool) {
+        overlayShown = shown
+        if !shown { inputOverlay.releaseAll() }
+        layoutInputOverlay()
+        let offscreen = inputOverlay.frame.offsetBy(dx: 0, dy: inputOverlay.frame.height)
+        let onscreen = inputOverlay.frame
+        if shown {
+            inputOverlay.isHidden = false
+            inputOverlay.frame = offscreen
+        }
+        overlayToggle.isHidden = true
+        UIView.animate(withDuration: 0.22, animations: {
+            self.inputOverlay.frame = shown ? onscreen : offscreen
+        }, completion: { _ in
+            self.inputOverlay.frame = onscreen
+            self.updateScreen()
+        })
+    }
+
+    /// Overlay: bottom band, settings-sized. Toggle arrow: bottom-right corner.
+    private func layoutInputOverlay() {
         let safe = view.bounds.inset(by: view.safeAreaInsets)
-        inputToolbar.center = CGPoint(x: safe.maxX - inputToolbar.bounds.width / 2 - 16,
-                                      y: safe.maxY - inputToolbar.bounds.height / 2 - 16)
-        trackpad.center = CGPoint(x: safe.minX + trackpad.bounds.width / 2 + 16,
-                                  y: safe.maxY - trackpad.bounds.height / 2 - 16)
+        let height = (view.bounds.height * CGFloat(AppSettings.shared.overlayHeight)).rounded()
+        inputOverlay.frame = CGRect(x: safe.minX, y: safe.maxY - height, width: safe.width, height: height)
+        overlayToggle.center = CGPoint(x: safe.maxX - overlayToggle.bounds.width / 2 - 10,
+                                       y: safe.maxY - overlayToggle.bounds.height / 2 - 10)
+    }
+
+    private func showSettings() {
+        let settings = UINavigationController(rootViewController: SettingsViewController())
+        settings.modalPresentationStyle = .formSheet
+        present(settings, animated: true)
     }
 
     // Stream-wide gestures (scroll, three-finger tap) only for touches on
@@ -188,10 +209,13 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         homeView.pendingMode = streaming ? nil : activeMode
         if !streaming {
             controls.isHidden = true
-            trackpad.isHidden = true
-            keyInput.resignFirstResponder()
+            if overlayShown {
+                overlayShown = false
+                inputOverlay.releaseAll()
+            }
         }
-        inputToolbar.isHidden = !streaming
+        inputOverlay.isHidden = !streaming || !overlayShown
+        overlayToggle.isHidden = !streaming || overlayShown
         cursorLayer.isHidden = !streaming || !cursorVisible || cursorLayer.contents == nil
         // Mid-stream drop (app switch, cable pulled): keep the last frame
         // up and say so, rather than flashing back to the home screen.
@@ -208,7 +232,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        placeInputPanelsIfNeeded()
+        layoutInputOverlay()
         announcePanel()
         updateCursorLayout()
     }
@@ -246,7 +270,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // MARK: - Touch -> "touch" control messages
 
     private var forwardingInput: Bool {
-        activeMode != nil && receivingVideo && controls.isHidden
+        activeMode != nil && receivingVideo && controls.isHidden && AppSettings.shared.directTouch
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {

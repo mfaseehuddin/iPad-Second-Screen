@@ -11,6 +11,7 @@
 		52AE181B83A9015E4BD157B9 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = D31D10293304F90494CF1032 /* LaunchScreen.storyboard */; };
 		979B14DB6CEC6E9908FE0506 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 067A36546AA0E8BB98C66B3F /* Assets.xcassets */; };
 		C0B12A851481B8A306F963F0 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B315F6329884FBDABCF68CDB /* AppDelegate.swift */; };
+		C3D4E5F60718293A4B5C6D7E /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7D6C5B4A3F20918273A6B5F /* Settings.swift */; };
 		B2C3D4E5F60718293A4B5C6D /* InputPanels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6C5B4A3E2F10918273A6B5E /* InputPanels.swift */; };
 		A1B2C3D4E5F60718293A4B5C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5B4A3D2E1F00918273A6B5D /* HomeView.swift */; };
 		F163F22AD06ECA70EC848C29 /* ReceiverViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD4E67EEBAADB7ABD549A827 /* ReceiverViewController.swift */; };
@@ -20,6 +21,7 @@
 		067A36546AA0E8BB98C66B3F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A28BE9AC4C2D52E4949FD21E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		B315F6329884FBDABCF68CDB /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		E7D6C5B4A3F20918273A6B5F /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
 		D6C5B4A3E2F10918273A6B5E /* InputPanels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputPanels.swift; sourceTree = "<group>"; };
 		C5B4A3D2E1F00918273A6B5D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		BD4E67EEBAADB7ABD549A827 /* ReceiverViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiverViewController.swift; sourceTree = "<group>"; };
@@ -44,6 +46,7 @@
 				067A36546AA0E8BB98C66B3F /* Assets.xcassets */,
 				A28BE9AC4C2D52E4949FD21E /* Info.plist */,
 				D31D10293304F90494CF1032 /* LaunchScreen.storyboard */,
+				E7D6C5B4A3F20918273A6B5F /* Settings.swift */,
 				D6C5B4A3E2F10918273A6B5E /* InputPanels.swift */,
 				C5B4A3D2E1F00918273A6B5D /* HomeView.swift */,
 				BD4E67EEBAADB7ABD549A827 /* ReceiverViewController.swift */,
@@ -133,6 +136,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C0B12A851481B8A306F963F0 /* AppDelegate.swift in Sources */,
+				C3D4E5F60718293A4B5C6D7E /* Settings.swift in Sources */,
 				B2C3D4E5F60718293A4B5C6D /* InputPanels.swift in Sources */,
 				A1B2C3D4E5F60718293A4B5C /* HomeView.swift in Sources */,
 				F163F22AD06ECA70EC848C29 /* ReceiverViewController.swift in Sources */,

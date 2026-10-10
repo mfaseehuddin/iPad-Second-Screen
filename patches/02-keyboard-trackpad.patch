@@ -1,8 +1,15 @@
+Modification of OpenDisplay (https://github.com/peetzweg/opendisplay),
+Copyright (c) 2026 Philip Poloczek, licensed under GPL-3.0 (see Mac/LICENSE).
+Modified 2026-10-11 for iPad-Second-Screen. This patch is likewise GPL-3.0.
+
+Keyboard and trackpad input from the receiving device: `key`, `text` and
+`mouse` control messages, and input injection in Mirror mode too.
+
 diff --git a/Mac/InputInjector.swift b/Mac/InputInjector.swift
-index e3fef82..be97dc2 100644
+index e3fef82..0e018c6 100644
 --- a/Mac/InputInjector.swift
 +++ b/Mac/InputInjector.swift
-@@ -68,4 +68,89 @@ final class InputInjector {
+@@ -68,4 +68,92 @@ final class InputInjector {
                                    wheel3: 0) else { return }
          event.post(tap: .cghidEventTap)
      }
@@ -19,6 +26,9 @@ index e3fef82..be97dc2 100644
 +        if modifiers.contains("opt") { flags.insert(.maskAlternate) }
 +        if modifiers.contains("ctrl") { flags.insert(.maskControl) }
 +        if modifiers.contains("shift") { flags.insert(.maskShift) }
++        // Real arrow keys carry these, and system shortcuts such as ⌃← / ⌃→
++        // (switch desktop) don't match an arrow press without them.
++        if (123...126).contains(code) { flags.formUnion([.maskNumericPad, .maskSecondaryFn]) }
 +        for keyDown in [true, false] {
 +            guard let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(code),
 +                                      keyDown: keyDown) else { return }

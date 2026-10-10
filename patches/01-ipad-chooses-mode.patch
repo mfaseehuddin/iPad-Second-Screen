@@ -1,3 +1,11 @@
+Modification of OpenDisplay (https://github.com/peetzweg/opendisplay),
+Copyright (c) 2026 Philip Poloczek, licensed under GPL-3.0 (see Mac/LICENSE).
+Modified 2026-10-11 for iPad-Second-Screen. This patch is likewise GPL-3.0.
+
+Lets the receiving device choose Mirror/Extend and start/stop sessions:
+optional `mode` in hello, a `standby` message, and redialing remembered
+Wi-Fi receivers that advertise gate=1.
+
 diff --git a/Mac/MacSender.swift b/Mac/MacSender.swift
 index ec0d669..8d11255 100644
 --- a/Mac/MacSender.swift
