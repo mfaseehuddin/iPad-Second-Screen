@@ -1,0 +1,41 @@
+# Builds an unsigned LegacyPadDisplay.ipa on a GitHub macOS runner, so no
+# local Xcode is needed. Sign and install it with Sideloadly (README, Step 2).
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "iOS/**"
+      - ".github/workflows/build-ipa.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (unsigned, arm64, iphoneos)
+        run: |
+          xcodebuild \
+            -project iOS/LegacyPadDisplay.xcodeproj \
+            -target LegacyPadDisplay \
+            -configuration Release \
+            -sdk iphoneos \
+            ARCHS=arm64 \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          mkdir Payload
+          cp -R build/Release-iphoneos/LegacyPadDisplay.app Payload/
+          zip -qry LegacyPadDisplay.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LegacyPadDisplay-ipa
+          path: LegacyPadDisplay.ipa

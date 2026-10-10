@@ -45,6 +45,10 @@ In Xcode:
 
 The app should show a fullscreen black screen with "Listening on :9000" at the bottom. It is waiting for the Mac.
 
+### No Xcode? Build on GitHub and sideload
+
+`.github/workflows/build-ipa.yml` builds an unsigned `LegacyPadDisplay.ipa` on a GitHub macOS runner (on every push to `iOS/`, or from **Actions → Build unsigned IPA → Run workflow**). Download the `LegacyPadDisplay-ipa` artifact, unzip it, and install it with [Sideloadly](https://sideloadly.io): plug the iPad in, drop the `.ipa` in, sign in with your Apple ID, Start. Then trust the certificate on the iPad (step 4 above). Same 7-day limit applies; re-run Sideloadly to refresh.
+
 ### Copy the iOS 12.5 DeviceSupport profile
 
 Recent Xcode builds do not ship iOS 12 device support. Without this folder the iPad does not appear as a Run destination, and Xcode reports "Failed to prepare the device for development". Copy the 12.5 profile from [apptim/iPhoneOSDeviceSupport](https://github.com/apptim/iPhoneOSDeviceSupport):
