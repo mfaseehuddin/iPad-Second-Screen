@@ -1,7 +1,8 @@
 // ReceiverViewController.swift
 //
-// Fullscreen video surface + touch/scroll input forwarding. Deliberately
-// plain UIKit (no SwiftUI) so it compiles for iOS 12.
+// Home screen (pick Extend / Mirror) over a fullscreen video surface with
+// touch/scroll input forwarding. Deliberately plain UIKit (no SwiftUI) so it
+// compiles for iOS 12.
 
 import UIKit
 import AVFoundation
@@ -15,8 +16,16 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
 
     private let videoView = VideoContainerView()
     private let statusLabel = UILabel()
+    private let homeView = HomeView()
+    private let controls = ControlsOverlay()
     private var receiver: VideoReceiver!
     private var lastVideoSize: CGSize = .zero
+
+    // nil = home screen. Set when the user picks a mode; the home screen
+    // stays up until the first frame of that mode arrives.
+    private var activeMode: DisplayMode?
+    private var receivingVideo = false
+    private var link: ReceiverLink?
 
     // Cursor sprite: positioned/sized in normalized [0,1] Mac-display space,
     // updated at control-message rate (fast) independent of the ~30ms video path.
@@ -54,6 +63,18 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
             statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
         ])
 
+        homeView.frame = view.bounds
+        homeView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        homeView.onChoose = { [weak self] mode in self?.choose(mode) }
+        view.addSubview(homeView)
+
+        controls.frame = view.bounds
+        controls.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        controls.isHidden = true
+        controls.onChoose = { [weak self] mode in self?.choose(mode) }
+        controls.onStop = { [weak self] in self?.stopStreaming() }
+        view.addSubview(controls)
+
         receiver = VideoReceiver(displayLayer: videoView.displayLayer)
         receiver.delegate = self
 
@@ -65,8 +86,53 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
         scrollPan.maximumNumberOfTouches = 2
         view.addGestureRecognizer(scrollPan)
 
+        // Three-finger tap while streaming = controls (switch mode / stop).
+        let controlsTap = UITapGestureRecognizer(target: self, action: #selector(showControls))
+        controlsTap.numberOfTouchesRequired = 3
+        view.addGestureRecognizer(controlsTap)
+
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground),
                                                 name: UIApplication.willEnterForegroundNotification, object: nil)
+    }
+
+    // MARK: - Mode selection
+
+    private func choose(_ mode: DisplayMode) {
+        // Tapping the pending tile again before the Mac connects cancels it.
+        if activeMode == mode, !receivingVideo {
+            stopStreaming()
+            return
+        }
+        if activeMode != mode { receivingVideo = false }
+        activeMode = mode
+        controls.mode = mode
+        receiver.request(mode: mode)
+        updateScreen()
+    }
+
+    private func stopStreaming() {
+        activeMode = nil
+        receivingVideo = false
+        receiver.stop()
+        updateScreen()
+    }
+
+    @objc private func showControls() {
+        guard activeMode != nil, receivingVideo else { return }
+        controls.show()
+    }
+
+    private func updateScreen() {
+        let streaming = activeMode != nil && receivingVideo
+        homeView.isHidden = streaming
+        homeView.link = link
+        homeView.pendingMode = streaming ? nil : activeMode
+        if !streaming { controls.isHidden = true }
+        cursorLayer.isHidden = !streaming || !cursorVisible || cursorLayer.contents == nil
+        // Mid-stream drop (app switch, cable pulled): keep the last frame
+        // up and say so, rather than flashing back to the home screen.
+        statusLabel.isHidden = !streaming || link != nil
+        statusLabel.text = "Reconnecting…"
     }
 
     // Backgrounding suspends our networking queue; the listener/connection
@@ -114,6 +180,10 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
 
     // MARK: - Touch -> "touch" control messages
 
+    private var forwardingInput: Bool {
+        activeMode != nil && receivingVideo && controls.isHidden
+    }
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         forwardTouch(touches, phase: "began")
     }
@@ -131,7 +201,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
     /// letterboxing that `.resizeAspect` introduces when the decoded frame's
     /// aspect ratio doesn't exactly match the view's.
     private func forwardTouch(_ touches: Set<UITouch>, phase: String) {
-        guard let touch = touches.first else { return }
+        guard forwardingInput, let touch = touches.first else { return }
         sendNormalized(touch: touch, phase: phase)
     }
 
@@ -169,7 +239,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
     // MARK: - Two-finger scroll -> "scroll" control messages
 
     @objc private func handleScroll(_ gesture: UIPanGestureRecognizer) {
-        guard gesture.state == .changed else { return }
+        guard forwardingInput, gesture.state == .changed else { return }
         let translation = gesture.translation(in: view)
         gesture.setTranslation(.zero, in: view)
         receiver.sendScroll(dx: Double(translation.x), dy: Double(translation.y))
@@ -178,22 +248,26 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
     // MARK: - VideoReceiverDelegate
 
     func videoReceiver(_ receiver: VideoReceiver, statusDidChange status: String) {
-        statusLabel.text = status
+        homeView.detail = status
     }
 
-    func videoReceiver(_ receiver: VideoReceiver, connectedDidChange connected: Bool) {
-        statusLabel.isHidden = connected
+    func videoReceiver(_ receiver: VideoReceiver, linkDidChange link: ReceiverLink?) {
+        self.link = link
+        updateScreen()
     }
 
     func videoReceiver(_ receiver: VideoReceiver, videoSizeDidChange size: CGSize) {
         lastVideoSize = size
+        // Frames left over from a stopped stream can still trickle in.
+        if activeMode != nil, link != nil { receivingVideo = true }
+        updateScreen()
         updateCursorLayout()
     }
 
     func videoReceiver(_ receiver: VideoReceiver, cursorDidChange point: CGPoint, visible: Bool) {
         cursorNorm = point
         cursorVisible = visible
-        cursorLayer.isHidden = !visible || cursorLayer.contents == nil
+        cursorLayer.isHidden = homeView.isHidden == false || !visible || cursorLayer.contents == nil
         updateCursorLayout()
     }
 
@@ -201,7 +275,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate {
         cursorLayer.contents = image.cgImage
         cursorLayer.anchorPoint = anchor
         cursorNormSize = normSize
-        cursorLayer.isHidden = !cursorVisible
+        cursorLayer.isHidden = homeView.isHidden == false || !cursorVisible
         updateCursorLayout()
     }
 }

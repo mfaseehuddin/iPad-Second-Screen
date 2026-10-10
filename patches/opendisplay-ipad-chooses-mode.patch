@@ -1,0 +1,142 @@
+diff --git a/Mac/MacSender.swift b/Mac/MacSender.swift
+index ec0d669..8d11255 100644
+--- a/Mac/MacSender.swift
++++ b/Mac/MacSender.swift
+@@ -73,9 +73,12 @@ struct PhoneInfo: Decodable {
+                           // across USB and WiFi
+     let pv: Int?          // receiver protocol version (issue #132); absent on
+                           // every pre-handshake install → treat as protocol 1
++    let mode: String?     // "mirror" / "extend" chosen on the device; absent →
++                          // the Mac's own Mode picker decides
+ 
+     var kind: String { device ?? "device" }
+     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
++    var requestedMode: CaptureMode? { mode.flatMap(CaptureMode.init(rawValue:)) }
+ }
+ 
+ /// How the sender reaches the receiver. Reconnects re-dial from scratch, so
+@@ -103,6 +106,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+     // Fired when the receiver announces the app is quitting: deliberate,
+     // so the controller ends the session without arming a reconnect.
+     @MainActor var onPeerClosed: (() -> Void)?
++    // Fired when the user stops (or switches mode) on the device: the
++    // controller ends this session and dials a fresh one that waits for
++    // the receiver's next hello.
++    @MainActor var onPeerStandby: (() -> Void)?
+     // Fired on every hello — carries the receiver's install id so the
+     // controller can deduplicate USB/WiFi sessions to the same device.
+     @MainActor var onHello: ((PhoneInfo) -> Void)?
+@@ -118,7 +125,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+     // can migrate a live session between transports via switchTransport.
+     private var transport: SenderTransport
+     private let endpointName: String
+-    private let mode: CaptureMode
++    // The Mac's Mode picker, unless the receiver's hello asks for another.
++    private var mode: CaptureMode
+     private let quality: StreamQuality
+     // Stable per-device serial for the virtual display, so macOS can tell
+     // multiple OpenDisplay monitors apart and persist their arrangement.
+@@ -265,6 +273,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             Log.info("Screen Recording permission granted")
+         }
+ 
++        // Wait for hello in both modes: a receiver may name the mode in it,
++        // and may hold it back until its user picks one. awaitingWake is
++        // queue-confined — read it there before surfacing.
++        queue.async { [weak self] in
++            guard let self else { return }
++            let text = self.awaitingWake
++                ? "\(self.endpointName) is asleep — reconnects when it wakes…"
++                : "Waiting for the device to connect…"
++            Task { await self.status(text) }
++        }
++        let info = try await waitForHello()
++        if let requested = info.requestedMode { mode = requested }
++
+         switch mode {
+         case .mirror:
+             let content = try await SCShareableContent.current
+@@ -278,15 +299,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+ 
+         case .extend:
+-            // awaitingWake is queue-confined — read it there before surfacing.
+-            queue.async { [weak self] in
+-                guard let self else { return }
+-                let text = self.awaitingWake
+-                    ? "\(self.endpointName) is asleep — reconnects when it wakes…"
+-                    : "Waiting for the device to connect…"
+-                Task { await self.status(text) }
+-            }
+-            let info = try await waitForHello()
+             try await setupExtend(info)
+ 
+             // Touch back-channel (Milestone 3). Needs Accessibility trust;
+@@ -1016,6 +1028,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             // without the silence grace and without waiting for a wake.
+             Log.info("receiver app closed — ending session")
+             Task { @MainActor in self.onPeerClosed?() }
++        case WireMessage.standby:
++            Log.info("receiver went to standby — ending session, redialing for its next request")
++            Task { @MainActor in self.onPeerStandby?() }
+         default:
+             Log.info("unknown control message type: \(type)")
+         }
+diff --git a/Mac/OpenSidecarMacApp.swift b/Mac/OpenSidecarMacApp.swift
+index 7916d61..5cdd831 100644
+--- a/Mac/OpenSidecarMacApp.swift
++++ b/Mac/OpenSidecarMacApp.swift
+@@ -334,8 +334,13 @@ final class SenderController: ObservableObject {
+                 connect(to: .usb(udid: device.udid))
+             }
+         }
+-        guard wifiAutoConnectArmed, Date() < wifiAutoConnectDeadline else { return }
+-        for result in discovered {
++        guard wifiAutoConnectArmed else { return }
++        // A receiver advertising gate=1 sends hello only after its user picks
++        // a mode, so dialing it puts nothing on screen — it's how the device
++        // starts a session without a click here. Still remembered devices only:
++        // a device's first WiFi connection is always approved on this Mac.
++        let launchWindowOpen = Date() < wifiAutoConnectDeadline
++        for result in discovered where launchWindowOpen || isGated(result) {
+             let target = ConnectionTarget.wifi(result)
+             if wifiRemembered.contains(target.sessionID),
+                activeSession(coveringWiFi: result) == nil,
+@@ -345,6 +350,11 @@ final class SenderController: ObservableObject {
+         }
+     }
+ 
++    private func isGated(_ result: NWBrowser.Result) -> Bool {
++        if case .bonjour(let txt) = result.metadata { return txt["gate"] == "1" }
++        return false
++    }
++
+     /// An attached, auto-connectable USB device is (about to be) dialed over
+     /// the cable — its WiFi service must not be grabbed in the launch race.
+     private func cabled(_ result: NWBrowser.Result) -> Bool {
+@@ -566,6 +576,15 @@ final class SenderController: ObservableObject {
+             Log.info("session \(session.id) closed by the receiver — ending")
+             self.end(session)
+         }
++        sender.onPeerStandby = { [weak self, weak session] in
++            // The user stopped or switched mode on the device. Tear the
++            // display down and keep a connection open so the device can
++            // start again on its own.
++            guard let self, let session else { return }
++            let target = session.target
++            self.end(session)
++            self.connect(to: target)
++        }
+         sessions.append(session)
+         Task {
+             do {
+diff --git a/Shared/Protocol.swift b/Shared/Protocol.swift
+index 1b74489..af54c9f 100644
+--- a/Shared/Protocol.swift
++++ b/Shared/Protocol.swift
+@@ -30,4 +30,5 @@ enum WireMessage {
+     static let updateRequired = "updateRequired"    // Mac -> phone: peer is below the Mac's floor
+     static let sleeping = "sleeping"                // phone -> Mac: device locked, reconnect on wake
+     static let closing = "closing"                  // phone -> Mac: app quit, end the session for good
++    static let standby = "standby"                  // phone -> Mac: user left the display; tear it down and redial for the next request
+ }
