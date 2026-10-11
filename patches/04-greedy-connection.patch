@@ -1,0 +1,128 @@
+Modification of OpenDisplay (https://github.com/peetzweg/opendisplay),
+Copyright (c) 2026 Philip Poloczek, licensed under GPL-3.0 (see Mac/LICENSE).
+Modified 2026-10-11 for iPad-Second-Screen. This patch is likewise GPL-3.0.
+
+Keeps the connection up in clamshell: rotation builds the new display
+before removing the old one, waits longer for it, retries failed rebuilds
+on the same connection, and redials a device that is still reachable when
+its session ends or fails to start.
+
+diff --git a/Mac/MacSender.swift b/Mac/MacSender.swift
+index 114019e..0576660 100644
+--- a/Mac/MacSender.swift
++++ b/Mac/MacSender.swift
+@@ -391,6 +391,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+                           userInfo: [NSLocalizedDescriptionKey: "CGVirtualDisplay creation failed"])
+         }
+         virtualDisplay = vd
++        configuredLandscape = info.pixelsWide >= info.pixelsHigh
+         inputInjector = InputInjector(displayID: vd.displayID)
+ 
+         let display = try await findSCDisplay(id: vd.displayID)
+@@ -413,6 +414,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+     /// until the built display matches the latest hello, so rotations that
+     /// arrive mid-rebuild aren't lost (and rapid flip-flops settle once).
+     private var reconfiguring = false
++    // Orientation of the display setupExtend last built (nil before the first).
++    private var configuredLandscape: Bool?
+     private func reconfigure(_ info: PhoneInfo) async {
+         guard !reconfiguring, !stopped else { return }
+         reconfiguring = true
+@@ -424,13 +427,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             stream = nil
+             if let encoder { VTCompressionSessionInvalidate(encoder) }
+             encoder = nil
+-            virtualDisplay = nil   // removes the old display
++            // Make before break when the orientation changes: the new display
++            // has a different serial, so it can exist alongside the old one,
++            // which setupExtend releases once its replacement is up. With the
++            // lid closed the virtual display is the Mac's only screen, and
++            // tearing it down first leaves the Mac with none. Same orientation
++            // means the same serial, so the old one has to go first.
++            if configuredLandscape == (target.pixelsWide >= target.pixelsHigh) {
++                virtualDisplay = nil
++            }
+             needsKeyframe = true
+             do {
+                 try await setupExtend(target)
+             } catch {
+-                Log.info("reconfigure failed: \(error)")
+-                await status("Rotation failed: \(error.localizedDescription)")
++                // Keep trying on this connection rather than sitting on a
++                // dead picture; capture recovery retries every few seconds.
++                Log.info("reconfigure failed: \(error) — retrying")
++                await status("Rebuilding the display failed — retrying…")
++                virtualDisplay = nil
++                queue.async { self.scheduleCaptureRecovery() }
+                 return
+             }
+             if let latest = lastHello,
+@@ -444,7 +459,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+ 
+     /// The virtual display takes a moment to show up in shareable content.
+     private func findSCDisplay(id: CGDirectDisplayID) async throws -> SCDisplay {
+-        for _ in 0..<20 {
++        // Up to 15 s: with the lid closed, macOS takes longer to settle when
++        // the only display changes.
++        for _ in 0..<60 {
+             let content = try await SCShareableContent.current
+             if let display = content.displays.first(where: { $0.displayID == id }) {
+                 return display
+@@ -604,12 +621,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             guard let self, !self.stopped, self.stream == nil,
+                   let hello = self.lastHello else { return }
+             Log.info("capture died — rebuilding pipeline")
+-            Task {
+-                await self.reconfigure(hello)
+-                self.queue.async {
+-                    if self.stream == nil { self.scheduleCaptureRecovery() }
+-                }
+-            }
++            // A failed rebuild schedules the next attempt itself.
++            Task { await self.reconfigure(hello) }
+         }
+     }
+ 
+diff --git a/Mac/OpenSidecarMacApp.swift b/Mac/OpenSidecarMacApp.swift
+index 5cdd831..035d63b 100644
+--- a/Mac/OpenSidecarMacApp.swift
++++ b/Mac/OpenSidecarMacApp.swift
+@@ -350,6 +350,14 @@ final class SenderController: ObservableObject {
+         }
+     }
+ 
++    /// Re-runs the auto-connect policy after a pause, so a session that
++    /// ended while its device is still attached (or advertising) comes back.
++    private func redialSoon(after seconds: Double = 3) {
++        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
++            self?.autoConnect()
++        }
++    }
++
+     private func isGated(_ result: NWBrowser.Result) -> Bool {
+         if case .bonjour(let txt) = result.metadata { return txt["gate"] == "1" }
+         return false
+@@ -555,6 +563,10 @@ final class SenderController: ObservableObject {
+             guard let self, let session else { return }
+             Log.info("device disconnected — session \(session.id) stopped")
+             self.end(session)
++            // Dial again if the device is still reachable (still cabled, or a
++            // gated WiFi receiver still advertising): a dropped session
++            // shouldn't need a replug or a click to come back.
++            self.redialSoon()
+         }
+         sender.onPeerSleeping = { [weak self, weak session] in
+             // The device locked. Unlike a plain disconnect this is a
+@@ -592,8 +604,10 @@ final class SenderController: ObservableObject {
+             } catch is CancellationError {
+                 // stopped by the user while waiting — nothing to report
+             } catch {
+-                Log.info("sender failed to start: \(error)")
+-                session.status = "Failed: \(error.localizedDescription)"
++                Log.info("sender failed to start: \(error) — retrying shortly")
++                session.status = "Failed: \(error.localizedDescription) — retrying…"
++                self.end(session)
++                self.redialSoon(after: 5)
+             }
+         }
+     }

@@ -1,0 +1,59 @@
+# Builds OpenDisplay.app (Revive's Mac side) with patches/ applied, ad-hoc signed,
+# on a GitHub macOS runner, so no local Xcode is needed. Download the zip from
+# the run's Artifacts (README, Step 1).
+name: Build Mac app
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "patches/**"
+      - "Mac"
+      - ".github/workflows/build-mac.yml"
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply patches to OpenDisplay
+        run: |
+          for p in patches/*.patch; do
+            echo "Applying $p"
+            git -C Mac apply "../$p"
+          done
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: Mac
+        run: xcodegen generate
+
+      - name: Build (Release, ad-hoc signed)
+        working-directory: Mac
+        run: |
+          xcodebuild \
+            -project OpenSidecar.xcodeproj \
+            -scheme OpenSidecarMac \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM= \
+            CODE_SIGN_IDENTITY=- \
+            ENABLE_HARDENED_RUNTIME=NO \
+            build
+
+      - name: Package
+        run: |
+          APP=$(find Mac/build/Build/Products/Release -maxdepth 1 -name '*.app' | head -1)
+          echo "Built $APP"
+          ditto -c -k --keepParent "$APP" OpenDisplay-for-Revive.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Revive-Mac
+          path: OpenDisplay-for-Revive.zip

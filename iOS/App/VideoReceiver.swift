@@ -30,14 +30,37 @@ import CoreMedia
 import VideoToolbox
 import UIKit
 
+/// How the Mac reached us. usbmuxd tunnels the cable connection in from
+/// loopback; anything else came over the network.
+enum ReceiverLink {
+    case cable, wifi
+}
+
+/// What the Mac should do with this device. Sent as `mode` in hello; the
+/// patched OpenDisplay Mac app honors it over its own Mode picker.
+enum DisplayMode: String {
+    case extend, mirror
+}
+
 protocol VideoReceiverDelegate: AnyObject {
     func videoReceiver(_ receiver: VideoReceiver, statusDidChange status: String)
-    func videoReceiver(_ receiver: VideoReceiver, connectedDidChange connected: Bool)
+    /// nil = no Mac connected.
+    func videoReceiver(_ receiver: VideoReceiver, linkDidChange link: ReceiverLink?)
     func videoReceiver(_ receiver: VideoReceiver, videoSizeDidChange size: CGSize)
     /// x/y normalized [0,1] against the Mac's captured display.
     func videoReceiver(_ receiver: VideoReceiver, cursorDidChange point: CGPoint, visible: Bool)
     /// anchor/normSize normalized against the Mac's captured display (see MacSender.pollCursorImage).
     func videoReceiver(_ receiver: VideoReceiver, cursorImageDidChange image: UIImage, anchor: CGPoint, normSize: CGSize)
+    /// Round trip to the Mac in ms (nil until measured) and frames per second
+    /// over the last few seconds; fps is nil while the Mac screen is still
+    /// (the Mac only sends a frame when something changes).
+    func videoReceiver(_ receiver: VideoReceiver, statsDidChange rttMs: Double?, fps: Int?)
+    /// Mac battery percent (nil without a battery), charging, and on mains power.
+    func videoReceiver(_ receiver: VideoReceiver, macStatusDidChange battery: Int?, charging: Bool, onAC: Bool)
+    /// Text copied on the Mac.
+    func videoReceiver(_ receiver: VideoReceiver, clipboardDidArrive text: String)
+    /// The Mac's screen locked or unlocked (capture pauses while locked).
+    func videoReceiver(_ receiver: VideoReceiver, macLockDidChange locked: Bool)
 }
 
 final class VideoReceiver {
@@ -60,12 +83,29 @@ final class VideoReceiver {
     private var port: UInt16 = 9000
     private var lastDataReceived = Date()
     private var watchdogStarted = false
+    private var advertisement: NetService?
 
-    // Native panel size announced to the Mac in "hello" so it can size the
-    // virtual display to match. Set these before calling start().
-    var devicePixelsWide: Int = 0
-    var devicePixelsHigh: Int = 0
-    var deviceScale: Double = 2
+    // Hello is held back until the user picks a mode, so a Mac that dials
+    // in (cable plugged in, or WiFi) waits without creating a display.
+    // Both are queue-confined.
+    private var requestedMode: DisplayMode?
+    private var helloSent = false
+
+    // Also queue-confined. Quality rides in hello; subscriptions go out in a
+    // "subscribe" message after it (patches/03-quality-clipboard-status.patch).
+    private var requestedQuality: String?
+    private var wantsClipboard = false
+    private var wantsStatus = false
+    private var framesSinceStats = 0
+    private var lastStatsAt = Date()
+    private var recentSamples: [(frames: Int, seconds: Double)] = []
+    private var rttMs: Double?
+
+    // Panel size announced to the Mac in "hello" so it can size the virtual
+    // display to match. Queue-confined; set through updatePanel().
+    private var devicePixelsWide: Int = 0
+    private var devicePixelsHigh: Int = 0
+    private var deviceScale: Double = 2
 
     // Stable per-install id (helps the Mac recognize "same device, other
     // transport"); persisted so it survives relaunches.
@@ -87,6 +127,7 @@ final class VideoReceiver {
     func start(port: UInt16 = 9000) {
         self.port = port
         queue.async { self.startListener() }
+        advertise()
         if !watchdogStarted {
             watchdogStarted = true
             scheduleWatchdog()
@@ -110,6 +151,89 @@ final class VideoReceiver {
             self.resetStreamState()
             self.startListener()
         }
+        advertise()
+    }
+
+    /// The panel size to announce in hello. If it changes mid-session (the
+    /// iPad rotated and the display should follow), hello is sent again and
+    /// the Mac rebuilds the virtual display at the new size.
+    func updatePanel(pixelsWide: Int, pixelsHigh: Int, scale: Double) {
+        queue.async { [weak self] in
+            guard let self = self,
+                  pixelsWide != self.devicePixelsWide || pixelsHigh != self.devicePixelsHigh else { return }
+            self.devicePixelsWide = pixelsWide
+            self.devicePixelsHigh = pixelsHigh
+            self.deviceScale = scale
+            if self.helloSent, let conn = self.connection, conn.state == .ready {
+                self.sendHello(on: conn)
+            }
+        }
+    }
+
+    /// Ask the Mac to start (or switch to) `mode`. Takes effect as soon as a
+    /// Mac is connected; switching mode goes through standby, and the Mac's
+    /// redial gets a hello carrying the new mode.
+    func request(mode: DisplayMode) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            let previous = self.requestedMode
+            self.requestedMode = mode
+            guard let conn = self.connection, conn.state == .ready else { return }
+            if !self.helloSent {
+                self.sendHello(on: conn)
+            } else if previous != mode {
+                self.sendControl(["type": "standby"], on: conn)
+            }
+        }
+    }
+
+    /// Stream quality to ask for ("best", "balanced", "fast"). Takes effect
+    /// on the next hello; call restartStream() to apply it now.
+    func setQuality(_ quality: String) {
+        queue.async { [weak self] in self?.requestedQuality = quality }
+    }
+
+    /// Rebuild the stream with the current settings: standby, then the Mac
+    /// redials and gets a fresh hello.
+    func restartStream() {
+        queue.async { [weak self] in
+            guard let self = self, self.helloSent else { return }
+            self.sendControl(["type": "standby"])
+        }
+    }
+
+    /// Opt in to clipboard sync and/or the Mac's battery status.
+    func subscribe(clipboard: Bool, status: Bool) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.wantsClipboard = clipboard
+            self.wantsStatus = status
+            if self.helloSent { self.sendSubscription() }
+        }
+    }
+
+    /// Text copied on the iPad, for the Mac's clipboard.
+    func sendClipboard(_ text: String) {
+        queue.async { [weak self] in
+            guard let self = self, self.wantsClipboard, text.utf8.count <= 16_000 else { return }
+            self.sendControl(["type": "clipboard", "text": text])
+        }
+    }
+
+    private func sendSubscription() {
+        sendControl(["type": "subscribe", "clipboard": wantsClipboard, "status": wantsStatus])
+    }
+
+    /// Ask the Mac to take the display down. The Mac redials and waits for
+    /// the next request().
+    func stop() {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.requestedMode = nil
+            if self.helloSent { self.sendControl(["type": "standby"]) }
+            self.helloSent = false
+            self.displayLayer.flush()
+        }
     }
 
     private func startListener() {
@@ -128,35 +252,23 @@ final class VideoReceiver {
             return
         }
 
-        // Bonjour advertisement (Wi-Fi discovery only; USB/usbmux connects
-        // straight to the port on the phone and never looks at this).
-        // NWTXTRecord needs iOS 13; on iOS 12 we advertise without the "id" TXT entry.
-        if #available(iOS 13.0, *) {
-            var txt = NWTXTRecord()
-            txt["id"] = Self.installID
-            listener?.service = NWListener.Service(name: UIDevice.current.name,
-                                                    type: "_opensidecar._tcp",
-                                                    domain: nil, txtRecord: txt)
-        } else {
-            listener?.service = NWListener.Service(name: UIDevice.current.name,
-                                                    type: "_opensidecar._tcp",
-                                                    domain: nil)
-        }
-
         listener?.newConnectionHandler = { [weak self] conn in
             guard let self = self else { return }
             self.connection?.cancel()
             self.connection = conn
+            self.helloSent = false
             self.resetStreamState()
             conn.stateUpdateHandler = { [weak self] state in
                 guard let self = self else { return }
                 switch state {
                 case .ready:
                     self.lastDataReceived = Date()
-                    self.setConnected(true)
-                    self.sendHello(on: conn)
+                    self.setLink(Self.link(of: conn))
+                    if self.requestedMode != nil { self.sendHello(on: conn) }
                 case .failed, .cancelled:
-                    self.setConnected(false)
+                    // A replaced connection's late cancel must not mark the
+                    // new one as gone.
+                    if self.connection === conn || self.connection == nil { self.setLink(nil) }
                 default:
                     break
                 }
@@ -184,6 +296,38 @@ final class VideoReceiver {
         listener?.start(queue: queue)
     }
 
+    /// Bonjour advertisement (WiFi discovery only; usbmuxd connects straight
+    /// to the port and never looks at this). NetService rather than
+    /// NWListener.service because NWTXTRecord needs iOS 13. TXT: `id` lets
+    /// the Mac match this device across USB and WiFi; `gate=1` tells the
+    /// patched Mac app it may dial us any time, since we send hello only
+    /// once the user picks a mode.
+    private func advertise() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.advertisement?.stop()
+            let service = NetService(domain: "", type: "_opensidecar._tcp.",
+                                     name: UIDevice.current.name, port: Int32(self.port))
+            service.setTXTRecord(NetService.data(fromTXTRecord: [
+                "id": Data(Self.installID.utf8),
+                "gate": Data("1".utf8),
+            ]))
+            service.publish()
+            self.advertisement = service
+        }
+    }
+
+    private static func link(of conn: NWConnection) -> ReceiverLink {
+        if case .hostPort(let host, _) = conn.endpoint {
+            switch host {
+            case .ipv4(let address) where address.isLoopback: return .cable
+            case .ipv6(let address) where address.isLoopback: return .cable
+            default: break
+            }
+        }
+        return .wifi
+    }
+
     private func scheduleWatchdog() {
         queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self = self else { return }
@@ -191,9 +335,41 @@ final class VideoReceiver {
                Date().timeIntervalSince(self.lastDataReceived) > 6 {
                 conn.cancel()
                 self.connection = nil
-                self.setConnected(false)
+                self.setLink(nil)
             }
+            self.reportStats()
             self.scheduleWatchdog()
+        }
+    }
+
+    /// Every watchdog tick: frames per second since the last tick, and a ping
+    /// whose pong gives the round trip.
+    private func reportStats() {
+        // Average over the last two ticks (~4 s) so the number doesn't jump,
+        // and call it idle when nothing arrived in the latest tick.
+        recentSamples.append((framesSinceStats, Date().timeIntervalSince(lastStatsAt)))
+        if recentSamples.count > 2 { recentSamples.removeFirst() }
+        let frames = recentSamples.reduce(0) { $0 + $1.frames }
+        let seconds = recentSamples.reduce(0) { $0 + $1.seconds }
+        let fps: Int? = framesSinceStats == 0 || seconds <= 0 ? nil : Int((Double(frames) / seconds).rounded())
+        framesSinceStats = 0
+        lastStatsAt = Date()
+        if helloSent, connection?.state == .ready {
+            sendControl(["type": "ping", "t": Date().timeIntervalSince1970 * 1000])
+        } else {
+            rttMs = nil
+        }
+        let rtt = rttMs
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.delegate?.videoReceiver(self, statsDidChange: rtt, fps: fps)
+        }
+    }
+
+    private func reportLock(_ locked: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.delegate?.videoReceiver(self, macLockDidChange: locked)
         }
     }
 
@@ -208,6 +384,8 @@ final class VideoReceiver {
     // MARK: - Outgoing control messages (phone -> Mac)
 
     private func sendHello(on conn: NWConnection) {
+        guard let mode = requestedMode else { return }
+        helloSent = true
         sendControl([
             "type": "hello",
             "pixelsWide": devicePixelsWide,
@@ -215,10 +393,13 @@ final class VideoReceiver {
             "scale": deviceScale,
             "device": UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone",
             "id": Self.installID,
+            "mode": mode.rawValue,
+            "quality": requestedQuality ?? "best",
             // No "pv" field on purpose: an absent protocol version is
             // defined by the Mac app as protocol 1, which every released
             // OpenDisplay Mac build supports (minSupportedPeer stays at 1).
         ], on: conn)
+        sendSubscription()
     }
 
     /// x/y normalized [0,1] in *decoded video* space, origin top-left.
@@ -229,6 +410,21 @@ final class VideoReceiver {
     /// dx/dy in video pixels (natural-scrolling sign, i.e. content follows the fingers).
     func sendScroll(dx: Double, dy: Double) {
         sendControl(["type": "scroll", "dx": dx, "dy": dy])
+    }
+
+    /// One key press: a macOS virtual key code plus "cmd"/"opt"/"ctrl"/"shift".
+    func sendKey(code: Int, modifiers: [String]) {
+        sendControl(["type": "key", "code": code, "mods": modifiers])
+    }
+
+    /// Typed characters, inserted on the Mac as-is.
+    func sendText(_ text: String) {
+        sendControl(["type": "text", "text": text])
+    }
+
+    /// Trackpad: action "move" (dx/dy in Mac points), or "down"/"up"/"click".
+    func sendMouse(action: String, button: String = "left", dx: Double = 0, dy: Double = 0) {
+        sendControl(["type": "mouse", "action": action, "button": button, "dx": dx, "dy": dy])
     }
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil) {
@@ -252,7 +448,7 @@ final class VideoReceiver {
             }
             if error != nil { return }
             if isComplete {
-                self.setConnected(false)
+                if self.connection === conn { self.setLink(nil) }
                 return
             }
             self.receive(on: conn)
@@ -294,6 +490,29 @@ final class VideoReceiver {
         case "ping":
             // Reply so the Mac's liveness check on this connection is happy.
             sendControl(["type": "pong", "t": obj["t"] ?? 0, "mt": Date().timeIntervalSince1970 * 1000])
+        case "pong":
+            // Reply to our own ping (see reportStats).
+            if let sent = obj["t"] as? Double {
+                rttMs = Date().timeIntervalSince1970 * 1000 - sent
+            }
+        case "macLock":
+            guard let locked = obj["locked"] as? Bool else { return }
+            reportLock(locked)
+        case "macStatus":
+            if let locked = obj["locked"] as? Bool { reportLock(locked) }
+            let battery = obj["battery"] as? Int
+            let charging = obj["charging"] as? Bool ?? false
+            let onAC = obj["onAC"] as? Bool ?? (battery == nil)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.delegate?.videoReceiver(self, macStatusDidChange: battery, charging: charging, onAC: onAC)
+            }
+        case "clipboard":
+            guard wantsClipboard, let text = obj["text"] as? String else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.delegate?.videoReceiver(self, clipboardDidArrive: text)
+            }
         case "cursor":
             let visible = (obj["v"] as? Int ?? 0) == 1
             let point = CGPoint(x: obj["x"] as? Double ?? 0, y: obj["y"] as? Double ?? 0)
@@ -435,6 +654,7 @@ final class VideoReceiver {
             displayLayer.flush()
         }
         displayLayer.enqueue(sample)
+        framesSinceStats += 1
     }
 
     // MARK: - Helpers
@@ -446,12 +666,12 @@ final class VideoReceiver {
         }
     }
 
-    private func setConnected(_ value: Bool) {
-        isConnected = value
+    private func setLink(_ link: ReceiverLink?) {
+        isConnected = link != nil
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.delegate?.videoReceiver(self, connectedDidChange: value)
+            self.delegate?.videoReceiver(self, linkDidChange: link)
         }
-        if !value { setStatus("Listening on :\(port)") } else { setStatus("Connected") }
+        setStatus(link == nil ? "Listening on :\(port)" : "Connected")
     }
 }

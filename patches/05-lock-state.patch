@@ -1,0 +1,70 @@
+Modification of OpenDisplay (https://github.com/peetzweg/opendisplay),
+Copyright (c) 2026 Philip Poloczek, licensed under GPL-3.0 (see Mac/LICENSE).
+Modified 2026-10-11 for iPad-Second-Screen. This patch is likewise GPL-3.0.
+
+Tells receivers that subscribe to status when the Mac locks or unlocks
+(`macLock` messages, and `locked` in `macStatus`).
+
+diff --git a/Mac/MacSender.swift b/Mac/MacSender.swift
+index 0576660..f76b5a3 100644
+--- a/Mac/MacSender.swift
++++ b/Mac/MacSender.swift
+@@ -509,6 +509,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+ 
+     func stop() {
+         stopped = true
++        let observers = lockObservers
++        lockObservers = []
++        DispatchQueue.main.async {
++            observers.forEach { DistributedNotificationCenter.default().removeObserver($0) }
++        }
+         cursorTimer?.cancel()
+         cursorTimer = nil
+         cursorImageTimer?.cancel()
+@@ -1067,6 +1072,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             // The receiver opts in to clipboard sync and/or Mac status.
+             clipboardSync = obj["clipboard"] as? Bool ?? false
+             statusSubscribed = obj["status"] as? Bool ?? false
++            if statusSubscribed { observeLock() }
+             if !extrasStarted {
+                 extrasStarted = true
+                 scheduleExtras()
+@@ -1123,9 +1129,36 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+         }
+     }
+ 
+-    /// Battery level and power source, for the receiver's status bar.
++    // Lock-screen notifications, registered on the main thread.
++    private var lockObservers: [NSObjectProtocol] = []
++
++    /// Tells the receiver the moment the Mac locks or unlocks: capture
++    /// pauses on the lock screen, and the receiver explains the frozen
++    /// picture and offers to type the password.
++    private func observeLock() {
++        DispatchQueue.main.async { [weak self] in
++            guard let self, self.lockObservers.isEmpty, !self.stopped else { return }
++            let center = DistributedNotificationCenter.default()
++            for (name, locked) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
++                let observer = center.addObserver(forName: Notification.Name(name), object: nil,
++                                                  queue: nil) { [weak self] _ in
++                    guard let self else { return }
++                    Log.info("screen \(locked ? "locked" : "unlocked") — telling the receiver")
++                    self.queue.async { self.sendJSON(["type": "macLock", "locked": locked]) }
++                }
++                self.lockObservers.append(observer)
++            }
++        }
++    }
++
++    private static var screenIsLocked: Bool {
++        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
++        return session?["CGSSessionScreenIsLocked"] as? Bool ?? false
++    }
++
++    /// Battery level, power source and lock state, for the receiver's status bar.
+     private func sendMacStatus() {
+-        var message: [String: Any] = ["type": "macStatus"]
++        var message: [String: Any] = ["type": "macStatus", "locked": Self.screenIsLocked]
+         if let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+            let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] {
+             for source in sources {

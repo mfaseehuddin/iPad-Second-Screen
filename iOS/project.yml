@@ -22,7 +22,7 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: LegacyPadDisplay
+        CFBundleDisplayName: Revive
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchStoryboardName: LaunchScreen
@@ -32,7 +32,8 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
           - UIInterfaceOrientationPortrait
-        NSLocalNetworkUsageDescription: "LegacyPadDisplay listens on the local network / USB so your Mac can send it a video stream."
+          - UIInterfaceOrientationPortraitUpsideDown
+        NSLocalNetworkUsageDescription: "Revive listens on the local network and USB so your Mac can send it its display."
         NSBonjourServices:
           - "_opensidecar._tcp"
     settings:
