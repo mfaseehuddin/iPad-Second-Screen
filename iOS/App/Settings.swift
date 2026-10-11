@@ -97,6 +97,21 @@ enum PictureTouch: String, CaseIterable {
     }
 }
 
+/// The overlay keyboard's layout.
+enum KeyboardLayout: String, CaseIterable {
+    /// A Mac keyboard: number row, tab, esc, arrows.
+    case mac
+    /// The iPad's own on-screen keyboard, with .?123 and #+= pages.
+    case iPad
+
+    var title: String {
+        switch self {
+        case .mac: return "Mac"
+        case .iPad: return "iPad"
+        }
+    }
+}
+
 /// What happens when the iPad is held upright.
 enum PortraitLayout: String, CaseIterable {
     case gameBoy, rotate, landscape
@@ -134,6 +149,11 @@ final class AppSettings {
     var overlayOpacity: Double {
         get { double("overlayOpacity", 0.4) }
         set { set(newValue, "overlayOpacity") }
+    }
+
+    var keyboardLayout: KeyboardLayout {
+        get { KeyboardLayout(rawValue: defaults.string(forKey: "keyboardLayout") ?? "") ?? .mac }
+        set { set(newValue.rawValue, "keyboardLayout") }
     }
 
     /// Share of the screen height the overlay covers, 0.3...0.6.
@@ -322,7 +342,7 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section)! {
-        case .overlay: return 2
+        case .overlay: return 3
         case .trackpad: return 4
         case .about: return 1
         case .touch: return 3
@@ -442,6 +462,11 @@ final class SettingsViewController: UITableViewController {
         case (.zoom, _):
             return SwitchCell(title: "Zoom follows the pointer", isOn: settings.zoomFollowsPointer) { [weak self] in
                 self?.settings.zoomFollowsPointer = $0
+            }
+        case (.overlay, 2):
+            return SegmentCell(title: "Keyboard", items: KeyboardLayout.allCases.map { $0.title },
+                               selected: KeyboardLayout.allCases.firstIndex(of: settings.keyboardLayout) ?? 0) { [weak self] in
+                self?.settings.keyboardLayout = KeyboardLayout.allCases[$0]
             }
         case (.overlay, 0):
             return SliderCell(title: "Opacity", value: settings.overlayOpacity, range: 0.15...0.9) { [weak self] in

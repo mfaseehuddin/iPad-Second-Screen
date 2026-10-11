@@ -44,7 +44,7 @@ index 7bd89f1..114019e 100644
  
          switch mode {
          case .mirror:
-@@ -1045,6 +1050,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+@@ -1045,6 +1050,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
              // without the silence grace and without waiting for a wake.
              Log.info("receiver app closed — ending session")
              Task { @MainActor in self.onPeerClosed?() }
@@ -57,7 +57,9 @@ index 7bd89f1..114019e 100644
 +                scheduleExtras()
 +            }
 +        case "clipboard":
-+            if let text = obj["text"] as? String, clipboardSync {
++            // Text already synced is dropped: Universal Clipboard can echo a
++            // copy back, and setting it again would bounce it forever.
++            if let text = obj["text"] as? String, clipboardSync, text != lastClipboard {
 +                lastClipboard = text
 +                DispatchQueue.main.async {
 +                    NSPasteboard.general.clearContents()
@@ -67,7 +69,7 @@ index 7bd89f1..114019e 100644
          case WireMessage.standby:
              Log.info("receiver went to standby — ending session, redialing for its next request")
              Task { @MainActor in self.onPeerStandby?() }
-@@ -1053,6 +1074,68 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+@@ -1053,6 +1076,68 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
          }
      }
  

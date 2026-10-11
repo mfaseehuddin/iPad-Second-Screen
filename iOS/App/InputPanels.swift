@@ -237,6 +237,7 @@ private func chevronLayer(pointingUp: Bool, in size: CGSize) -> CAShapeLayer {
 final class InputOverlay: PanelView {
 
     var onKey: ((Int, [String]) -> Void)?
+    var onText: ((String) -> Void)?
     var onMove: ((Double, Double) -> Void)?
     var onClick: ((String) -> Void)?
     var onButton: ((String, Bool) -> Void)?
@@ -269,6 +270,7 @@ final class InputOverlay: PanelView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         keyboard.onKey = { [weak self] code, modifiers in self?.onKey?(code, modifiers) }
+        keyboard.onText = { [weak self] text in self?.onText?(text) }
         macroBar.onMacro = { [weak self] macro in self?.onKey?(macro.code, macro.modifiers) }
         macroBar.onSettings = { [weak self] in self?.onSettings?() }
         macroBar.onHide = { [weak self] in self?.onHide?() }
@@ -294,6 +296,7 @@ final class InputOverlay: PanelView {
         let settings = AppSettings.shared
         let opacity = CGFloat(settings.overlayOpacity)
         keyboard.keyOpacity = opacity
+        keyboard.layout = settings.keyboardLayout
         trackpad.padOpacity = opacity
         macroBar.buttonOpacity = opacity
         macroBar.macros = settings.enabledMacros
@@ -545,58 +548,159 @@ private final class MacroBar: UIView {
 private final class MacKeyboardView: UIView {
 
     var onKey: ((Int, [String]) -> Void)?
+    /// Characters off the US layout (€, £, ¥), typed as text.
+    var onText: ((String) -> Void)?
     var keyOpacity: CGFloat = 0.4 { didSet { caps.indices.forEach(style) } }
+    var layout: KeyboardLayout = .mac {
+        didSet {
+            guard layout != oldValue else { return }
+            page = .letters
+            rebuild()
+        }
+    }
+
+    /// The iPad layout's pages, like the iPad keyboard's .?123 and #+=.
+    private enum Page { case letters, numbers, symbols }
+    private var page = Page.letters
 
     private struct Key {
         let label: String
         let shiftedLabel: String?
-        let code: Int
+        let code: Int           // -1: no key press (page switch, gap, text)
         let width: CGFloat
         var modifier: String? = nil
         var repeats = false
         var half: Half? = nil   // the stacked ↑/↓ arrow keys
+        /// Shift types this key press instead (the iPad's ",!" and ".?" keys).
+        var shifted: (code: Int, shift: Bool)? = nil
+        /// A symbol typed with Shift on a US keyboard, e.g. "(" is Shift-9.
+        var needsShift = false
+        /// Typed as text: a character off the US layout.
+        var text: String? = nil
+        /// Switches the iPad layout to this page.
+        var page: Page? = nil
+        /// Empty space (the iPad's indent before "a"); touches go to the next key.
+        var gap = false
 
         enum Half { case top, bottom }
 
         static func char(_ label: String, _ shifted: String?, _ code: Int) -> Key {
             Key(label: label, shiftedLabel: shifted, code: code, width: 1)
         }
+
+        static func special(_ label: String, _ code: Int, _ width: CGFloat, repeats: Bool = false) -> Key {
+            Key(label: label, shiftedLabel: nil, code: code, width: width, repeats: repeats)
+        }
+
+        static func modifier(_ label: String, _ code: Int, _ width: CGFloat, _ name: String) -> Key {
+            Key(label: label, shiftedLabel: nil, code: code, width: width, modifier: name)
+        }
+
+        /// The key press that types `character` on a US keyboard.
+        static func typing(_ character: Character) -> Key {
+            guard let stroke = MacKeyCode.keystroke(for: character) else {
+                return Key(label: String(character), shiftedLabel: nil, code: -1, width: 1, text: String(character))
+            }
+            return Key(label: String(character), shiftedLabel: nil, code: stroke.code, width: 1, needsShift: stroke.shift)
+        }
+
+        static func typing(_ characters: String) -> [Key] { characters.map { typing($0) } }
+
+        static func page(_ label: String, _ page: Page, _ width: CGFloat) -> Key {
+            Key(label: label, shiftedLabel: nil, code: -1, width: width, page: page)
+        }
+
+        static func gap(_ width: CGFloat) -> Key {
+            Key(label: "", shiftedLabel: nil, code: -1, width: width, gap: true)
+        }
     }
 
-    // Widths in key units; every row adds up to 14.5.
-    private static let rows: [[Key]] = [
+    // Mac layout. Widths in key units; every row adds up to 14.5.
+    private static let macRows: [[Key]] = [
         [.char("`", "~", 50), .char("1", "!", 18), .char("2", "@", 19), .char("3", "#", 20),
          .char("4", "$", 21), .char("5", "%", 23), .char("6", "^", 22), .char("7", "&", 26),
          .char("8", "*", 28), .char("9", "(", 25), .char("0", ")", 29), .char("-", "_", 27),
-         .char("=", "+", 24), Key(label: "⌫", shiftedLabel: nil, code: MacKeyCode.delete, width: 1.5, repeats: true)],
-        [Key(label: "tab", shiftedLabel: nil, code: MacKeyCode.tab, width: 1.5),
+         .char("=", "+", 24), .special("⌫", MacKeyCode.delete, 1.5, repeats: true)],
+        [.special("tab", MacKeyCode.tab, 1.5),
          .char("q", "Q", 12), .char("w", "W", 13), .char("e", "E", 14), .char("r", "R", 15),
          .char("t", "T", 17), .char("y", "Y", 16), .char("u", "U", 32), .char("i", "I", 34),
          .char("o", "O", 31), .char("p", "P", 35), .char("[", "{", 33), .char("]", "}", 30),
          .char("\\", "|", 42)],
-        [Key(label: "esc", shiftedLabel: nil, code: MacKeyCode.escape, width: 1.75),
+        [.special("esc", MacKeyCode.escape, 1.75),
          .char("a", "A", 0), .char("s", "S", 1), .char("d", "D", 2), .char("f", "F", 3),
          .char("g", "G", 5), .char("h", "H", 4), .char("j", "J", 38), .char("k", "K", 40),
          .char("l", "L", 37), .char(";", ":", 41), .char("'", "\"", 39),
-         Key(label: "return", shiftedLabel: nil, code: MacKeyCode.returnKey, width: 1.75)],
-        [Key(label: "⇧", shiftedLabel: nil, code: 56, width: 2.25, modifier: "shift"),
+         .special("return", MacKeyCode.returnKey, 1.75)],
+        [.modifier("⇧", 56, 2.25, "shift"),
          .char("z", "Z", 6), .char("x", "X", 7), .char("c", "C", 8), .char("v", "V", 9),
          .char("b", "B", 11), .char("n", "N", 45), .char("m", "M", 46), .char(",", "<", 43),
          .char(".", ">", 47), .char("/", "?", 44),
-         Key(label: "⇧", shiftedLabel: nil, code: 60, width: 2.25, modifier: "shift")],
+         .modifier("⇧", 60, 2.25, "shift")],
         // The space bar is centered on the keyboard (4.25 units either side):
         // with no fn key, a Mac-style bottom row put it a key left of center.
-        [Key(label: "⌃", shiftedLabel: nil, code: 59, width: 1.25, modifier: "ctrl"),
-         Key(label: "⌥", shiftedLabel: nil, code: 58, width: 1.25, modifier: "opt"),
-         Key(label: "⌘", shiftedLabel: nil, code: 55, width: 1.75, modifier: "cmd"),
-         Key(label: "", shiftedLabel: nil, code: MacKeyCode.space, width: 6, repeats: true),
-         Key(label: "⌘", shiftedLabel: nil, code: 54, width: 1.25, modifier: "cmd"),
-         Key(label: "←", shiftedLabel: nil, code: MacKeyCode.left, width: 1, repeats: true),
-         Key(label: "↑", shiftedLabel: nil, code: MacKeyCode.up, width: 1, repeats: true, half: .top),
-         Key(label: "↓", shiftedLabel: nil, code: MacKeyCode.down, width: 1, repeats: true, half: .bottom),
-         Key(label: "→", shiftedLabel: nil, code: MacKeyCode.right, width: 1, repeats: true)],
+        [Key.modifier("⌃", 59, 1.25, "ctrl"), Key.modifier("⌥", 58, 1.25, "opt"),
+         Key.modifier("⌘", 55, 1.75, "cmd"), Key.special("", MacKeyCode.space, 6, repeats: true),
+         Key.modifier("⌘", 54, 1.25, "cmd")] + arrowKeys,
     ]
-    private static let rowUnits: CGFloat = 14.5
+
+    private static let arrowKeys: [Key] = [
+        .special("←", MacKeyCode.left, 1, repeats: true),
+        Key(label: "↑", shiftedLabel: nil, code: MacKeyCode.up, width: 1, repeats: true, half: .top),
+        Key(label: "↓", shiftedLabel: nil, code: MacKeyCode.down, width: 1, repeats: true, half: .bottom),
+        .special("→", MacKeyCode.right, 1, repeats: true),
+    ]
+
+    // iPad layout, modeled on the iPad's own keyboard (iOS 12): four rows,
+    // the home row indented half a key, a wide return, ",!" and ".?" keys,
+    // and number and symbol pages. The ⌃ ⌥ ⌘ keys sit where the iPad has
+    // its globe, dictation and .?123 keys. Every row adds up to 11.5.
+    private static let iPadLetters: [[Key]] = [
+        [.char("q", "Q", 12), .char("w", "W", 13), .char("e", "E", 14), .char("r", "R", 15),
+         .char("t", "T", 17), .char("y", "Y", 16), .char("u", "U", 32), .char("i", "I", 34),
+         .char("o", "O", 31), .char("p", "P", 35), .special("⌫", MacKeyCode.delete, 1.5, repeats: true)],
+        [.gap(0.5),
+         .char("a", "A", 0), .char("s", "S", 1), .char("d", "D", 2), .char("f", "F", 3),
+         .char("g", "G", 5), .char("h", "H", 4), .char("j", "J", 38), .char("k", "K", 40),
+         .char("l", "L", 37), .special("return", MacKeyCode.returnKey, 2)],
+        [.modifier("⇧", 56, 1, "shift"),
+         .char("z", "Z", 6), .char("x", "X", 7), .char("c", "C", 8), .char("v", "V", 9),
+         .char("b", "B", 11), .char("n", "N", 45), .char("m", "M", 46),
+         Key(label: ",", shiftedLabel: "!", code: 43, width: 1, shifted: (18, true)),
+         Key(label: ".", shiftedLabel: "?", code: 47, width: 1, shifted: (44, true)),
+         .modifier("⇧", 60, 1.5, "shift")],
+        [.page(".?123", .numbers, 1.5), .modifier("⌃", 59, 1, "ctrl"), .modifier("⌥", 58, 1, "opt"),
+         .special("", MacKeyCode.space, 5, repeats: true),
+         .modifier("⌘", 55, 1.5, "cmd"), .page(".?123", .numbers, 1.5)],
+    ]
+
+    private static func iPadSymbolRows(top: String, middle: String, switchLabel: String, switchTo: Page) -> [[Key]] {
+        [
+            Key.typing(top) + [Key.special("⌫", MacKeyCode.delete, 1.5, repeats: true)],
+            [Key.gap(0.5)] + Key.typing(middle) + [Key.special("return", MacKeyCode.returnKey, 2)],
+            [Key.page(switchLabel, switchTo, 1), Key.special("esc", MacKeyCode.escape, 1),
+             Key.special("tab", MacKeyCode.tab, 1)]
+                + Key.typing(".,?!'\"`") + [Key.page(switchLabel, switchTo, 1.5)],
+            [Key.page("ABC", .letters, 1.5)] + arrowKeys
+                + [Key.special("", MacKeyCode.space, 4, repeats: true),
+                   Key.modifier("⌘", 55, 1.5, "cmd"), Key.page("ABC", .letters, 1.5)],
+        ]
+    }
+
+    private static let iPadNumbers = iPadSymbolRows(top: "1234567890", middle: "-/:;()$&@",
+                                                    switchLabel: "#+=", switchTo: .symbols)
+    private static let iPadSymbols = iPadSymbolRows(top: "[]{}#%^*+=", middle: "_\\|~<>€£¥",
+                                                    switchLabel: "123", switchTo: .numbers)
+
+    private var rows: [[Key]] {
+        switch (layout, page) {
+        case (.mac, _): return Self.macRows
+        case (.iPad, .letters): return Self.iPadLetters
+        case (.iPad, .numbers): return Self.iPadNumbers
+        case (.iPad, .symbols): return Self.iPadSymbols
+        }
+    }
+
+    private var rowUnits: CGFloat { layout == .mac ? 14.5 : 11.5 }
     private static let modifierOrder = ["cmd", "opt", "ctrl", "shift"]
 
     private var keys: [Key] = []
@@ -614,12 +718,28 @@ private final class MacKeyboardView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
-        keys = Self.rows.flatMap { $0 }
-        for _ in keys {
+        rebuild()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// New key caps for the current layout and page. Keys held down are
+    /// released; tapped (latched) modifiers carry over.
+    private func rebuild() {
+        caps.forEach { $0.removeFromSuperview() }
+        caps = []
+        labels = []
+        touchKeys.removeAll()
+        pressed.removeAll()
+        held.removeAll()
+        heldUnused.removeAll()
+        stopRepeat()
+        keys = rows.flatMap { $0 }
+        for key in keys {
             let cap = UIView()
             cap.isUserInteractionEnabled = false
-            cap.layer.cornerRadius = 6
             cap.layer.borderWidth = 1
+            cap.isHidden = key.gap
             let label = UILabel()
             label.textAlignment = .center
             label.textColor = .white
@@ -636,18 +756,20 @@ private final class MacKeyboardView: UIView {
         }
         caps.indices.forEach(style)
         updateLabels()
+        setNeedsLayout()
     }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let gap: CGFloat = 5
-        let rowHeight = bounds.height / CGFloat(Self.rows.count)
-        let unit = bounds.width / Self.rowUnits
-        let fontSize = min(22, rowHeight * 0.36)
+        let rows = self.rows
+        let rowHeight = bounds.height / CGFloat(rows.count)
+        let unit = bounds.width / rowUnits
+        // The iPad keyboard has roomier gaps between its bigger keys.
+        let gapX: CGFloat = layout == .mac ? 5 : min(12, unit * 0.14)
+        let gapY: CGFloat = layout == .mac ? 5 : min(12, rowHeight * 0.16)
+        let fontSize = layout == .mac ? min(22, rowHeight * 0.36) : min(26, rowHeight * 0.42)
         frames = []
-        for (rowIndex, row) in Self.rows.enumerated() {
+        for (rowIndex, row) in rows.enumerated() {
             var x: CGFloat = 0
             let y = CGFloat(rowIndex) * rowHeight
             for key in row {
@@ -664,10 +786,11 @@ private final class MacKeyboardView: UIView {
             }
         }
         for (index, frame) in frames.enumerated() {
-            caps[index].frame = frame.insetBy(dx: gap / 2, dy: gap / 2)
+            caps[index].frame = frame.insetBy(dx: gapX / 2, dy: gapY / 2)
+            caps[index].layer.cornerRadius = layout == .mac ? 6 : 7
             labels[index].frame = caps[index].bounds.insetBy(dx: 3, dy: 0)
-            labels[index].font = .systemFont(ofSize: keys[index].label.count > 1 ? fontSize * 0.7 : fontSize,
-                                             weight: .medium)
+            labels[index].font = .systemFont(ofSize: keys[index].label.count > 1 ? fontSize * 0.62 : fontSize,
+                                             weight: layout == .mac ? .medium : .regular)
         }
     }
 
@@ -694,12 +817,18 @@ private final class MacKeyboardView: UIView {
     }
 
     private func keyIndex(at point: CGPoint) -> Int? {
-        frames.firstIndex { $0.contains(point) }
+        guard let index = frames.firstIndex(where: { $0.contains(point) }) else { return nil }
+        return keys[index].gap ? (index + 1 < keys.count ? index + 1 : nil) : index
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
             guard let index = keyIndex(at: touch.location(in: self)) else { continue }
+            if let page = keys[index].page {
+                self.page = page
+                rebuild()
+                continue
+            }
             touchKeys[ObjectIdentifier(touch)] = index
             press(index)
         }
@@ -737,13 +866,25 @@ private final class MacKeyboardView: UIView {
             refresh()
             return
         }
-        let active = held.union(latched)
-        let modifiers = Self.modifierOrder.filter { active.contains($0) }
+        var active = held.union(latched)
         heldUnused.subtract(held)
         latched.removeAll()
-        onKey?(key.code, modifiers)
+        if let text = key.text {
+            onText?(text)
+            refresh()
+            return
+        }
+        var code = key.code
+        if active.contains("shift"), let shifted = key.shifted {
+            code = shifted.code
+            if !shifted.shift { active.remove("shift") }
+        } else if key.needsShift {
+            active.insert("shift")
+        }
+        let modifiers = Self.modifierOrder.filter { active.contains($0) }
+        onKey?(code, modifiers)
         refresh()
-        if key.repeats { startRepeat(code: key.code, modifiers: modifiers) }
+        if key.repeats { startRepeat(code: code, modifiers: modifiers) }
     }
 
     private func release(_ index: Int) {

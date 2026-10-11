@@ -44,7 +44,10 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     // Clipboard sync: the iPad side polls its pasteboard while streaming.
     private var clipboardTimer: Timer?
     private var lastPasteboardCount = UIPasteboard.general.changeCount
-    private var lastClipboardFromMac: String?
+    // Text last sent to or received from the Mac. Universal Clipboard can
+    // echo a synced copy back as a fresh pasteboard change; sending it again
+    // would bounce the same text between the devices forever.
+    private var lastSyncedClipboard: String?
 
     // Status bar contents.
     private var macBattery: Int?
@@ -240,6 +243,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     private func setUpInputPanels() {
         inputOverlay.isHidden = true
         inputOverlay.onKey = { [weak self] code, modifiers in self?.receiver.sendKey(code: code, modifiers: modifiers) }
+        inputOverlay.onText = { [weak self] text in self?.receiver.sendText(text) }
         inputOverlay.onMove = { [weak self] dx, dy in self?.receiver.sendMouse(action: "move", dx: dx, dy: dy) }
         inputOverlay.onClick = { [weak self] button in self?.receiver.sendMouse(action: "click", button: button) }
         inputOverlay.onButton = { [weak self] button, down in
@@ -602,7 +606,8 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         let pasteboard = UIPasteboard.general
         guard pasteboard.changeCount != lastPasteboardCount else { return }
         lastPasteboardCount = pasteboard.changeCount
-        if let text = pasteboard.string, text != lastClipboardFromMac {
+        if let text = pasteboard.string, text != lastSyncedClipboard {
+            lastSyncedClipboard = text
             receiver.sendClipboard(text)
         }
     }
@@ -899,7 +904,8 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     }
 
     func videoReceiver(_ receiver: VideoReceiver, clipboardDidArrive text: String) {
-        lastClipboardFromMac = text
+        guard text != lastSyncedClipboard else { return }
+        lastSyncedClipboard = text
         UIPasteboard.general.string = text
         lastPasteboardCount = UIPasteboard.general.changeCount
     }
