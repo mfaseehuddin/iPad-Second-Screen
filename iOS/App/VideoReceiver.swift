@@ -102,6 +102,9 @@ final class VideoReceiver {
     private var lastStatsAt = Date()
     private var recentSamples: [(frames: Int, seconds: Double)] = []
     private var rttMs: Double?
+    // Bumped per live quality request; an acknowledgement (or a newer
+    // request) cancels the standby fallback. Queue-confined.
+    private var qualityRequest = 0
 
     // Background (queue-confined). Frames aren't drawn while the app is in
     // the background; afterwards the picture waits for a fresh keyframe,
@@ -253,9 +256,30 @@ final class VideoReceiver {
     }
 
     /// Stream quality to ask for ("best", "balanced", "fast"). Takes effect
-    /// on the next hello; call restartStream() to apply it now.
+    /// on the next hello; call changeQuality() to apply it now.
     func setQuality(_ quality: String) {
         queue.async { [weak self] in self?.requestedQuality = quality }
+    }
+
+    /// Switch quality mid-stream. The Mac restarts only capture and the
+    /// encoder, keeping the display and this connection, and acknowledges
+    /// with qualityChanged (patches/07-live-quality.patch). A Mac without
+    /// that patch ignores the request, so without an acknowledgement the
+    /// stream is rebuilt through standby instead.
+    func changeQuality(_ quality: String) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.requestedQuality = quality
+            guard self.helloSent, let conn = self.connection, conn.state == .ready else { return }
+            self.qualityRequest += 1
+            let request = self.qualityRequest
+            self.sendControl(["type": "quality", "quality": quality], on: conn)
+            self.queue.asyncAfter(deadline: .now() + 4) { [weak self] in
+                guard let self = self, self.qualityRequest == request,
+                      self.helloSent, self.connection === conn else { return }
+                self.restartStream()
+            }
+        }
     }
 
     /// Rebuild the stream with the current settings: standby, then the Mac
@@ -581,6 +605,8 @@ final class VideoReceiver {
                     clockOffsetMs = clockSamples.min { $0.rtt < $1.rtt }?.offset
                 }
             }
+        case "qualityChanged":
+            qualityRequest += 1
         case "macLock":
             guard let locked = obj["locked"] as? Bool else { return }
             reportLock(locked)

@@ -1,0 +1,96 @@
+Modification of OpenDisplay (https://github.com/peetzweg/opendisplay),
+Copyright (c) 2026 Philip Poloczek, licensed under GPL-3.0 (see Mac/LICENSE).
+Modified 2026-10-11 for iPad-Second-Screen. This patch is likewise GPL-3.0.
+
+Live quality switch: a `quality` message restarts only capture and the
+encoder at the new size and bitrate, keeping the display and the
+connection. Acknowledged with `qualityChanged`.
+
+diff --git a/Mac/MacSender.swift b/Mac/MacSender.swift
+index a0cdb6f..f713ebe 100644
+--- a/Mac/MacSender.swift
++++ b/Mac/MacSender.swift
+@@ -222,6 +222,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+     private var lastCursorSent: (x: Double, y: Double, visible: Bool) = (-1, -1, false)
+     private var lastCursorPNGHash = 0
+     private var captureDisplayID: CGDirectDisplayID = 0
++    // What capture last started on, and its size before quality scaling, so
++    // a quality change can restart capture alone (see changeQuality).
++    private var captureDisplay: SCDisplay?
++    private var nativeCaptureSize = (width: 0, height: 0)
+ 
+     // Input latency: touches arrive stamped in our clock (the phone applies
+     // its sync offset); delta to now = network + deframe + dispatch.
+@@ -301,6 +305,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+             // Input lands on the mirrored (main) display.
+             inputInjector = InputInjector(displayID: display.displayID)
+             // SCDisplay reports points; capture at point resolution for M1.
++            nativeCaptureSize = (display.width, display.height)
+             let captureW = (Int(Double(display.width) * quality.scale)) & ~1
+             let captureH = (Int(Double(display.height) * quality.scale)) & ~1
+             try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+@@ -397,6 +402,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+         let display = try await findSCDisplay(id: vd.displayID)
+         // Quality scaling: capture/encode below native when requested — the
+         // display itself stays native so window layout is unaffected.
++        nativeCaptureSize = (pointsWide * 2, pointsHigh * 2)
+         let captureW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
+         let captureH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
+         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+@@ -457,6 +463,36 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+         }
+     }
+ 
++    /// Switch stream quality without touching the display or the connection:
++    /// only capture and the encoder restart, at the new size and bitrate, and
++    /// the receiver resyncs on the keyframe that follows. Acknowledged with
++    /// `qualityChanged`, which tells the receiver this build can do it (older
++    /// ones go through standby instead).
++    private func changeQuality(to newQuality: StreamQuality) async {
++        guard !stopped, !reconfiguring, let display = captureDisplay, nativeCaptureSize.width > 0 else { return }
++        reconfiguring = true
++        defer { reconfiguring = false }
++        if newQuality != quality {
++            Log.info("quality \(quality.rawValue) → \(newQuality.rawValue)")
++            quality = newQuality
++            if let stream { try? await stream.stopCapture() }
++            stream = nil
++            if let encoder { VTCompressionSessionInvalidate(encoder) }
++            encoder = nil
++            needsKeyframe = true
++            let captureW = (Int(Double(nativeCaptureSize.width) * quality.scale)) & ~1
++            let captureH = (Int(Double(nativeCaptureSize.height) * quality.scale)) & ~1
++            do {
++                try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
++            } catch {
++                Log.info("quality change failed: \(error) — retrying")
++                queue.async { self.scheduleCaptureRecovery() }
++                return
++            }
++        }
++        queue.async { self.sendJSON(["type": "qualityChanged", "quality": newQuality.rawValue]) }
++    }
++
+     /// The virtual display takes a moment to show up in shareable content.
+     private func findSCDisplay(id: CGDirectDisplayID) async throws -> SCDisplay {
+         // Up to 15 s: with the lid closed, macOS takes longer to settle when
+@@ -499,6 +535,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+         try await stream.startCapture()
+         self.stream = stream
+         captureDisplayID = display.displayID
++        captureDisplay = display
+         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
+         lastCursorSent = (-1, -1, false)
+         startCursorEcho()
+@@ -1087,6 +1124,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
+                     NSPasteboard.general.setString(text, forType: .string)
+                 }
+             }
++        case "quality":
++            // Live quality switch (patches/07-live-quality.patch).
++            if let requested = (obj["quality"] as? String).flatMap(StreamQuality.init(rawValue:)) {
++                Task { await self.changeQuality(to: requested) }
++            }
+         case WireMessage.standby:
+             Log.info("receiver went to standby — ending session, redialing for its next request")
+             Task { @MainActor in self.onPeerStandby?() }

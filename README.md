@@ -34,7 +34,7 @@ Tested on an iPad Air (A1475, iOS 12.5.8) with a Mac on macOS 26. Any iPad or iP
 
 Revive has two halves:
 
-- **Mac: [OpenDisplay](https://github.com/peetzweg/opendisplay)** with six patches (`patches/`). OpenDisplay creates a virtual display, captures it, encodes H.264, and sends it to the device over USB (`usbmuxd`) or Wi-Fi (Bonjour). It turns the device's input into mouse and keyboard events. OpenDisplay's own iPad app needs iPadOS 17; Revive is what makes it work on iOS 12.
+- **Mac: [OpenDisplay](https://github.com/peetzweg/opendisplay)** with seven patches (`patches/`). OpenDisplay creates a virtual display, captures it, encodes H.264, and sends it to the device over USB (`usbmuxd`) or Wi-Fi (Bonjour). It turns the device's input into mouse and keyboard events. OpenDisplay's own iPad app needs iPadOS 17; Revive is what makes it work on iOS 12.
 - **iPad: the Revive app** (`iOS/`), a clean-room iOS 12 client of OpenDisplay's protocol. It listens on port 9000, decodes the video, draws the Mac's cursor, and sends input and requests back.
 
 The patches add what lets the iPad drive the session:
@@ -43,6 +43,7 @@ The patches add what lets the iPad drive the session:
 | --- | --- |
 | `hello` with `mode`, `quality` | Start Extend or Mirror at a quality chosen on the iPad. The iPad sends `hello` only after you tap a mode. |
 | `standby` | Stop: the Mac removes the display and waits for the next tap. |
+| `quality` → `qualityChanged` | Switch quality live, keeping the display and the connection. |
 | `key`, `text`, `mouse` | Keyboard, typed text and trackpad input. |
 | `subscribe` → `clipboard`, `macStatus`, `macLock` | Clipboard sync, Mac battery, and lock state. |
 | Bonjour TXT `gate=1` | A Wi-Fi iPad you've connected once can start sessions at any time. |

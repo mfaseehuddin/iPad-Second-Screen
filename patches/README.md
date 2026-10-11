@@ -10,6 +10,7 @@
 | `04-greedy-connection.patch` | Keeps the session alive with the lid closed. When the device rotates, the new display is built before the old one is removed, so the Mac always has a screen. Failed rebuilds retry on the same connection, and a device that's still reachable is dialed again when its session ends or fails to start. |
 | `05-lock-state.patch` | Tells receivers that subscribe to status when the Mac locks or unlocks (`macLock`, and `locked` in `macStatus`). The picture pauses on the lock screen, so the receiver can explain why and offer to type the password. |
 | `06-no-stuck-modifiers.patch` | Fixes left clicks turning into right clicks after a shortcut. macOS kept the last key event's modifiers (e.g. ⌃ from ⌃→) as held, so later clicks became ⌃-clicks. Injected mouse, scroll and text events now carry no modifiers, and modifiers are released after every shortcut. |
+| `07-live-quality.patch` | Switches stream quality live: a `quality` message restarts only capture and the encoder at the new size and bitrate, keeping the display and the connection. Acknowledged with `qualityChanged`; receivers fall back to standby on builds without it. |
 
 Apply them yourself with:
 

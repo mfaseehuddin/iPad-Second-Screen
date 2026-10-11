@@ -274,8 +274,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         let settings = AppSettings.shared
         if settings.quality != appliedQuality {
             appliedQuality = settings.quality
-            receiver.setQuality(settings.quality.rawValue)
-            receiver.restartStream()
+            receiver.changeQuality(settings.quality.rawValue)
         }
         if settings.displaySize != appliedDisplaySize {
             appliedDisplaySize = settings.displaySize
