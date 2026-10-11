@@ -55,6 +55,8 @@ protocol VideoReceiverDelegate: AnyObject {
     /// over the last few seconds; fps is nil while the Mac screen is still
     /// (the Mac only sends a frame when something changes).
     func videoReceiver(_ receiver: VideoReceiver, statsDidChange rttMs: Double?, fps: Int?)
+    /// Everything the debug panel shows, once a second while it's on.
+    func videoReceiver(_ receiver: VideoReceiver, debugDidUpdate info: StreamDebugInfo)
     /// Mac battery percent (nil without a battery), charging, and on mains power.
     func videoReceiver(_ receiver: VideoReceiver, macStatusDidChange battery: Int?, charging: Bool, onAC: Bool)
     /// Text copied on the Mac.
@@ -101,6 +103,43 @@ final class VideoReceiver {
     private var recentSamples: [(frames: Int, seconds: Double)] = []
     private var rttMs: Double?
 
+    // Background (queue-confined). Frames aren't drawn while the app is in
+    // the background; afterwards the picture waits for a fresh keyframe,
+    // since the skipped frames were references for the ones that follow.
+    private var backgrounded = false
+    private var awaitingKeyframe = false
+    private var framesSkippedInBackground = 0
+
+    // Debug panel numbers (queue-confined). The win* values cover the
+    // current one-second window.
+    private var debugEnabled = false
+    private var connectedAt: Date?
+    private var winFrames = 0
+    private var winBytes = 0
+    private var winMaxFrame = 0
+    private var winGapsMs: [Double] = []
+    private var winEncodeMs: [Double] = []
+    private var winTransitMs: [Double] = []
+    private var winControl = 0
+    private var lastWindowAt = Date()
+    private var lastFrameAt: Date?
+    private var framesTotal = 0
+    private var bytesTotal = 0
+    private var keyframesTotal = 0
+    private var lastKeyframeAt: Date?
+    private var lastKeyframeBytes = 0
+    private var recentRtts: [Double] = []
+    // Mac clock minus iPad clock, from the ping with the lowest recent round
+    // trip, so frame timestamps from the Mac can be read on the iPad's clock.
+    private var clockSamples: [(rtt: Double, offset: Double)] = []
+    private var clockOffsetMs: Double?
+    private var layerFailures = 0
+    private var profile = ""
+    private var macPing: [String: Double] = [:]
+    private var macPingAt: Date?
+    private var macEncDropRate: Double?
+    private var macNetDropRate: Double?
+
     // Panel size announced to the Mac in "hello" so it can size the virtual
     // display to match. Queue-confined; set through updatePanel().
     private var devicePixelsWide: Int = 0
@@ -131,27 +170,53 @@ final class VideoReceiver {
         if !watchdogStarted {
             watchdogStarted = true
             scheduleWatchdog()
+            scheduleDebugTick()
         }
     }
 
-    /// Call when the app returns to the foreground. iOS suspends our queue
-    /// while backgrounded (no background networking mode declared), so the
-    /// listener/connection can die silently without ever reaching the
-    /// `.failed` state that would otherwise trigger startListener()'s own
-    /// retry -- leaving the screen stuck on the last decoded frame forever.
-    /// Unconditionally tearing down and recreating both here costs a brief
-    /// reconnect flicker but guarantees we never stay stuck black.
-    func ensureListening() {
+    /// Tears down and recreates the listener and connection. When iOS has
+    /// suspended our queue in the background, they can die silently without
+    /// ever reaching the `.failed` state that would otherwise trigger
+    /// startListener()'s own retry -- leaving the screen stuck on the last
+    /// decoded frame forever. Costs a brief reconnect flicker.
+    private func reconnect() {
+        connection?.cancel()
+        connection = nil
+        listener?.cancel()
+        listener = nil
+        resetStreamState()
+        startListener()
+        advertise()
+    }
+
+    /// The app went to the background (true) or came back (false). In the
+    /// background the connection stays up only if something keeps the app
+    /// running (BackgroundKeeper); otherwise iOS suspends us.
+    func setBackgrounded(_ isBackground: Bool) {
         queue.async { [weak self] in
             guard let self = self else { return }
-            self.connection?.cancel()
-            self.connection = nil
-            self.listener?.cancel()
-            self.listener = nil
-            self.resetStreamState()
-            self.startListener()
+            if isBackground {
+                self.backgrounded = true
+                self.framesSkippedInBackground = 0
+                return
+            }
+            self.backgrounded = false
+            // Still connected and hearing from the Mac: keep the session and
+            // just resync the picture. Otherwise reconnect from scratch.
+            if let conn = self.connection, conn.state == .ready,
+               Date().timeIntervalSince(self.lastDataReceived) < 3 {
+                self.displayLayer.flush()
+                self.awaitingKeyframe = true
+                if self.helloSent { self.sendControl(["type": "kf"], on: conn) }
+            } else {
+                self.reconnect()
+            }
         }
-        advertise()
+    }
+
+    /// Debug panel numbers on (once a second, see debugDidUpdate) or off.
+    func setDebugEnabled(_ enabled: Bool) {
+        queue.async { [weak self] in self?.debugEnabled = enabled }
     }
 
     /// The panel size to announce in hello. If it changes mid-session (the
@@ -263,6 +328,7 @@ final class VideoReceiver {
                 switch state {
                 case .ready:
                     self.lastDataReceived = Date()
+                    self.connectedAt = Date()
                     self.setLink(Self.link(of: conn))
                     if self.requestedMode != nil { self.sendHello(on: conn) }
                 case .failed, .cancelled:
@@ -378,6 +444,15 @@ final class VideoReceiver {
         formatDesc = nil
         sps = nil
         pps = nil
+        awaitingKeyframe = false
+        connectedAt = nil
+        lastFrameAt = nil
+        clockSamples.removeAll()
+        clockOffsetMs = nil
+        macPing.removeAll()
+        macPingAt = nil
+        macEncDropRate = nil
+        macNetDropRate = nil
         displayLayer.flush()
     }
 
@@ -486,14 +561,25 @@ final class VideoReceiver {
     private func handleControlJSON(_ data: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return }
+        winControl += 1
         switch type {
         case "ping":
             // Reply so the Mac's liveness check on this connection is happy.
             sendControl(["type": "pong", "t": obj["t"] ?? 0, "mt": Date().timeIntervalSince1970 * 1000])
+            recordMacPing(obj)
         case "pong":
             // Reply to our own ping (see reportStats).
             if let sent = obj["t"] as? Double {
-                rttMs = Date().timeIntervalSince1970 * 1000 - sent
+                let now = Date().timeIntervalSince1970 * 1000
+                let rtt = now - sent
+                rttMs = rtt
+                recentRtts.append(rtt)
+                if recentRtts.count > 30 { recentRtts.removeFirst() }
+                if let macTime = obj["mt"] as? Double {
+                    clockSamples.append((rtt, macTime - (sent + now) / 2))
+                    if clockSamples.count > 10 { clockSamples.removeFirst() }
+                    clockOffsetMs = clockSamples.min { $0.rtt < $1.rtt }?.offset
+                }
             }
         case "macLock":
             guard let locked = obj["locked"] as? Bool else { return }
@@ -539,14 +625,16 @@ final class VideoReceiver {
     private func handleAnnexB(_ data: Data) {
         // Split on 4-byte start codes (00 00 00 01). Anything before the
         // first start code is telemetry JSON prefix the Mac may prepend --
-        // we just discard it since we don't compute end-to-end latency here.
+        // only the debug panel reads it (recordTelemetry).
         var nalus: [Data] = []
+        var firstStartCode: Int?
         data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             let bytes = raw.bindMemory(to: UInt8.self)
             var naluStart: Int? = nil
             var i = 0
             while i + 4 <= bytes.count {
                 if bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 0, bytes[i + 3] == 1 {
+                    if firstStartCode == nil { firstStartCode = i }
                     if let s = naluStart, s < i { nalus.append(Data(bytes[s..<i])) }
                     naluStart = i + 4
                     i += 4
@@ -557,16 +645,22 @@ final class VideoReceiver {
             if let s = naluStart, s < bytes.count { nalus.append(Data(bytes[s...])) }
         }
 
+        if let start = firstStartCode, start > 0 { recordTelemetry(data.prefix(start)) }
+
         var vclNALUs: [Data] = []
+        var isKeyframe = false
         for nalu in nalus {
             guard let first = nalu.first else { continue }
             switch first & 0x1F {
             case 7: // SPS
-                if sps != nalu { sps = nalu; formatDesc = nil }
+                if sps != nalu { sps = nalu; formatDesc = nil; profile = Self.describeProfile(sps: nalu) }
             case 8: // PPS
                 if pps != nalu { pps = nalu; formatDesc = nil }
             case 6:
                 break // SEI, ignore
+            case 5: // IDR slice
+                isKeyframe = true
+                vclNALUs.append(nalu)
             default:
                 vclNALUs.append(nalu) // slice data
             }
@@ -576,6 +670,15 @@ final class VideoReceiver {
             buildFormatDescription(sps: sps, pps: pps)
         }
         guard !vclNALUs.isEmpty else { return }
+        recordFrame(bytes: data.count, keyframe: isKeyframe)
+        if backgrounded {
+            framesSkippedInBackground += 1
+            return
+        }
+        if awaitingKeyframe {
+            guard isKeyframe else { return }
+            awaitingKeyframe = false
+        }
         enqueueFrame(vclNALUs)
     }
 
@@ -651,10 +754,152 @@ final class VideoReceiver {
         }
 
         if displayLayer.status == .failed {
+            layerFailures += 1
             displayLayer.flush()
         }
         displayLayer.enqueue(sample)
         framesSinceStats += 1
+    }
+
+    // MARK: - Debug statistics
+
+    private func recordFrame(bytes: Int, keyframe: Bool) {
+        let now = Date()
+        if let last = lastFrameAt { winGapsMs.append(now.timeIntervalSince(last) * 1000) }
+        lastFrameAt = now
+        winFrames += 1
+        winBytes += bytes
+        winMaxFrame = max(winMaxFrame, bytes)
+        framesTotal += 1
+        bytesTotal += bytes
+        if keyframe {
+            keyframesTotal += 1
+            lastKeyframeAt = now
+            lastKeyframeBytes = bytes
+        }
+    }
+
+    /// The Mac prefixes each frame with {"cap":ms,"snd":ms}: when the screen
+    /// was captured and when the encoded frame was handed to the network,
+    /// both on the Mac's clock.
+    private func recordTelemetry(_ prefix: Data) {
+        guard prefix.first == UInt8(ascii: "{"),
+              let obj = try? JSONSerialization.jsonObject(with: prefix) as? [String: Any],
+              let cap = obj["cap"] as? Double, let snd = obj["snd"] as? Double else { return }
+        winEncodeMs.append(snd - cap)
+        if let offset = clockOffsetMs {
+            winTransitMs.append(Date().timeIntervalSince1970 * 1000 - (snd - offset))
+        }
+    }
+
+    /// The Mac's ping carries running totals of its frame drops, its send
+    /// queue, capture rate and input latency.
+    private func recordMacPing(_ obj: [String: Any]) {
+        var values: [String: Double] = [:]
+        for (key, value) in obj { if let number = value as? Double { values[key] = number } }
+        let now = Date()
+        if let at = macPingAt {
+            let seconds = now.timeIntervalSince(at)
+            if seconds > 0 {
+                if let enc = values["encDrops"], let before = macPing["encDrops"] {
+                    macEncDropRate = max(0, enc - before) / seconds
+                }
+                if let net = values["netDrops"], let before = macPing["netDrops"] {
+                    macNetDropRate = max(0, net - before) / seconds
+                }
+            }
+        }
+        macPing = values
+        macPingAt = now
+    }
+
+    private static func describeProfile(sps: Data) -> String {
+        guard sps.count >= 4 else { return "" }
+        let names: [UInt8: String] = [66: "Baseline", 77: "Main", 88: "Extended", 100: "High"]
+        let level = Double(sps[sps.startIndex + 3]) / 10
+        return "\(names[sps[sps.startIndex + 1]] ?? "profile \(sps[sps.startIndex + 1])") \(level)"
+    }
+
+    private func scheduleDebugTick() {
+        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self = self else { return }
+            self.reportDebug()
+            self.scheduleDebugTick()
+        }
+    }
+
+    private func reportDebug() {
+        let now = Date()
+        let seconds = max(now.timeIntervalSince(lastWindowAt), 0.001)
+        defer {
+            lastWindowAt = now
+            winFrames = 0
+            winBytes = 0
+            winMaxFrame = 0
+            winGapsMs.removeAll(keepingCapacity: true)
+            winEncodeMs.removeAll(keepingCapacity: true)
+            winTransitMs.removeAll(keepingCapacity: true)
+            winControl = 0
+        }
+        guard debugEnabled else { return }
+
+        func mean(_ values: [Double]) -> Double? {
+            values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
+        }
+        var info = StreamDebugInfo()
+        info.link = isConnected ? connection.map(Self.link(of:)) : nil
+        if let conn = connection, case .hostPort(let host, _) = conn.endpoint { info.remote = "\(host)" }
+        info.connectedFor = connectedAt.map { now.timeIntervalSince($0) }
+        info.mode = requestedMode?.rawValue
+        info.quality = requestedQuality ?? "best"
+        info.panel = "\(devicePixelsWide)×\(devicePixelsHigh) @\(Int(deviceScale))x"
+        info.videoSize = videoSize
+        info.profile = profile
+        info.fps = Double(winFrames) / seconds
+        info.mbps = Double(winBytes) * 8 / seconds / 1_000_000
+        info.avgFrameKB = winFrames > 0 ? Double(winBytes) / Double(winFrames) / 1024 : 0
+        info.maxFrameKB = Double(winMaxFrame) / 1024
+        info.framesTotal = framesTotal
+        info.megabytesTotal = Double(bytesTotal) / 1_048_576
+        info.keyframes = keyframesTotal
+        info.lastKeyframeAgo = lastKeyframeAt.map { now.timeIntervalSince($0) }
+        info.lastKeyframeKB = Double(lastKeyframeBytes) / 1024
+        if let gapMean = mean(winGapsMs) {
+            info.gapAvgMs = gapMean
+            info.gapMaxMs = winGapsMs.max()
+            info.jitterMs = (winGapsMs.map { ($0 - gapMean) * ($0 - gapMean) }.reduce(0, +)
+                             / Double(winGapsMs.count)).squareRoot()
+        }
+        info.rttMs = rttMs
+        info.rttMinMs = recentRtts.min()
+        info.rttMaxMs = recentRtts.max()
+        info.clockOffsetMs = clockOffsetMs
+        info.encodeMs = mean(winEncodeMs)
+        info.transitMs = mean(winTransitMs)
+        info.transitMaxMs = winTransitMs.max()
+        switch displayLayer.status {
+        case .rendering: info.layerStatus = "rendering"
+        case .failed: info.layerStatus = "failed"
+        default: info.layerStatus = "idle"
+        }
+        info.layerFailures = layerFailures
+        info.backlogKB = Double(buffer.count) / 1024
+        info.controlPerSec = Double(winControl) / seconds
+        info.awaitingKeyframe = awaitingKeyframe
+        info.backgrounded = backgrounded
+        info.framesSkippedInBackground = framesSkippedInBackground
+        info.macCaptureFps = macPing["capFps"]
+        info.macEncDropRate = macEncDropRate
+        info.macNetDropRate = macNetDropRate
+        info.macEncDrops = macPing["encDrops"].map(Int.init)
+        info.macNetDrops = macPing["netDrops"].map(Int.init)
+        info.macPendingSends = macPing["pending"].map(Int.init)
+        info.macInputP50 = macPing["inp50"]
+        info.macInputP95 = macPing["inp95"]
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.delegate?.videoReceiver(self, debugDidUpdate: info)
+        }
     }
 
     // MARK: - Helpers

@@ -24,6 +24,8 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
     private let controls = ControlsOverlay()
     private let inputOverlay = InputOverlay()
     private let overlayToggle = OverlayToggleButton()
+    private let debugPanel = DebugPanel()
+    private let backgroundKeeper = BackgroundKeeper()
     private var overlayShown = false
     private var receiver: VideoReceiver!
     private var lastVideoSize: CGSize = .zero
@@ -98,6 +100,9 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         isPortrait && AppSettings.shared.portraitLayout == .gameBoy && activeMode != nil && receivingVideo
     }
 
+    /// The debug panel sits between the picture and the overlay when docked.
+    private var showsDebugPanel: Bool { docked && AppSettings.shared.debugPanel }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
@@ -149,7 +154,11 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         let settings = AppSettings.shared
         receiver.setQuality(settings.quality.rawValue)
         receiver.subscribe(clipboard: settings.syncClipboard, status: true)
+        receiver.setDebugEnabled(settings.debugPanel)
         if settings.autoStart, let mode = settings.lastMode { choose(mode) }
+
+        debugPanel.isHidden = true
+        view.addSubview(debugPanel)
 
         // Pinch the picture to zoom (iPad only); two-finger double-tap resets.
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
@@ -216,6 +225,14 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
 
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground),
                                                 name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
+                                               name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground),
+                                               name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive),
+                                               name: UIApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(deviceWillLock),
+                                               name: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil)
     }
 
     // MARK: - Keyboard / trackpad
@@ -261,6 +278,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
             announcePanel()
         }
         receiver.subscribe(clipboard: settings.syncClipboard, status: true)
+        receiver.setDebugEnabled(settings.debugPanel)
         if !settings.pinchToZoom { setZoom(1, animated: false) }
         inputOverlay.applySettings()
         UIViewController.attemptRotationToDeviceOrientation()
@@ -298,7 +316,12 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
                                                  : safe.width / safe.height
             setVideoFrame(CGRect(x: 0, y: safe.minY, width: view.bounds.width,
                                  height: (view.bounds.width * aspect).rounded()))
-            let top = videoClip.frame.maxY + 6
+            var top = videoClip.frame.maxY + 6
+            if showsDebugPanel {
+                debugPanel.frame = CGRect(x: safe.minX + 8, y: top, width: safe.width - 16,
+                                          height: DebugPanel.preferredHeight)
+                top = debugPanel.frame.maxY + 6
+            }
             let height = inputOverlay.preferredHeight(full: safe.maxY - top)
             inputOverlay.frame = CGRect(x: safe.minX, y: top, width: safe.width, height: height)
         } else {
@@ -625,6 +648,7 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
             }
         }
         inputOverlay.isHidden = !streaming || !(overlayShown || docked)
+        debugPanel.isHidden = !showsDebugPanel
         inputOverlay.showsHideButton = !docked
         overlayToggle.isHidden = !streaming || overlayShown || docked
         cursorLayer.isHidden = !streaming || !cursorVisible || cursorLayer.contents == nil
@@ -645,11 +669,36 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         statusLabel.text = "Reconnecting…"
     }
 
-    // Backgrounding suspends our networking queue; the listener/connection
-    // can die silently without ever telling us, leaving the screen stuck on
-    // the last decoded frame. Force a clean reconnect on every return.
+    // MARK: - Background
+
+    // Silent audio starts while the app is still active (leaving for the home
+    // screen, another app, Control Center), because iOS suspends an app
+    // that isn't already playing. It runs only while a mode is on.
+    @objc private func appWillResignActive() {
+        if activeMode != nil, AppSettings.shared.keepAliveInBackground { backgroundKeeper.start() }
+    }
+
+    @objc private func appDidBecomeActive() {
+        backgroundKeeper.stop()
+    }
+
+    @objc private func appDidEnterBackground() {
+        receiver.setBackgrounded(true)
+    }
+
+    /// The iPad locked (passcode set): let it sleep rather than stream to a
+    /// dark screen. iOS suspends the app once the silence stops.
+    @objc private func deviceWillLock() {
+        backgroundKeeper.stop()
+    }
+
+    // Kept alive in the background, the session carries on and the picture
+    // resyncs on a keyframe. Otherwise iOS suspended our networking and the
+    // listener/connection can die silently without ever telling us, leaving
+    // the screen stuck on the last decoded frame, so the receiver reconnects
+    // from scratch (it tells the two apart by whether the Mac is still heard).
     @objc private func appWillEnterForeground() {
-        receiver.ensureListening()
+        receiver.setBackgrounded(false)
         let settings = AppSettings.shared
         if activeMode == nil, settings.autoStart, let mode = settings.lastMode { choose(mode) }
     }
@@ -828,6 +877,12 @@ final class ReceiverViewController: UIViewController, VideoReceiverDelegate, UIG
         statsText = (rttMs.map { "\(Int($0.rounded())) ms  ·  " } ?? "") + (fps.map { "\($0) fps" } ?? "idle")
         updateStatusBar()
         updateScreen()
+    }
+
+    func videoReceiver(_ receiver: VideoReceiver, debugDidUpdate info: StreamDebugInfo) {
+        let keepAlive = !AppSettings.shared.keepAliveInBackground ? "off"
+            : backgroundKeeper.isPlaying ? "playing" : "on"
+        debugPanel.show(info, keepAlive: keepAlive)
     }
 
     func videoReceiver(_ receiver: VideoReceiver, macStatusDidChange battery: Int?, charging: Bool, onAC: Bool) {

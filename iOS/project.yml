@@ -25,6 +25,9 @@ targets:
         CFBundleDisplayName: Revive
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # Silent audio keeps the Mac connection up in the background (BackgroundKeeper).
+        UIBackgroundModes:
+          - audio
         UILaunchStoryboardName: LaunchScreen
         UIRequiresFullScreen: true
         UIStatusBarHidden: true

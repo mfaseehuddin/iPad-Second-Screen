@@ -584,12 +584,13 @@ private final class MacKeyboardView: UIView {
          .char("b", "B", 11), .char("n", "N", 45), .char("m", "M", 46), .char(",", "<", 43),
          .char(".", ">", 47), .char("/", "?", 44),
          Key(label: "⇧", shiftedLabel: nil, code: 60, width: 2.25, modifier: "shift")],
+        // The space bar is centered on the keyboard (4.25 units either side):
+        // with no fn key, a Mac-style bottom row put it a key left of center.
         [Key(label: "⌃", shiftedLabel: nil, code: 59, width: 1.25, modifier: "ctrl"),
          Key(label: "⌥", shiftedLabel: nil, code: 58, width: 1.25, modifier: "opt"),
-         Key(label: "⌘", shiftedLabel: nil, code: 55, width: 1.5, modifier: "cmd"),
-         Key(label: "", shiftedLabel: nil, code: MacKeyCode.space, width: 4.75, repeats: true),
-         Key(label: "⌘", shiftedLabel: nil, code: 54, width: 1.5, modifier: "cmd"),
-         Key(label: "⌥", shiftedLabel: nil, code: 61, width: 1.25, modifier: "opt"),
+         Key(label: "⌘", shiftedLabel: nil, code: 55, width: 1.75, modifier: "cmd"),
+         Key(label: "", shiftedLabel: nil, code: MacKeyCode.space, width: 6, repeats: true),
+         Key(label: "⌘", shiftedLabel: nil, code: 54, width: 1.25, modifier: "cmd"),
          Key(label: "←", shiftedLabel: nil, code: MacKeyCode.left, width: 1, repeats: true),
          Key(label: "↑", shiftedLabel: nil, code: MacKeyCode.up, width: 1, repeats: true, half: .top),
          Key(label: "↓", shiftedLabel: nil, code: MacKeyCode.down, width: 1, repeats: true, half: .bottom),

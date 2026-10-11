@@ -230,6 +230,20 @@ final class AppSettings {
         set { set(newValue, "showStatusBar") }
     }
 
+    /// Stay connected while the app is in the background (silent audio,
+    /// see BackgroundKeeper), so the picture is back instantly on return.
+    var keepAliveInBackground: Bool {
+        get { bool("keepAliveInBackground", true) }
+        set { set(newValue, "keepAliveInBackground") }
+    }
+
+    /// Stream diagnostics between the picture and the keyboard in the Game
+    /// Boy layout.
+    var debugPanel: Bool {
+        get { bool("debugPanel", false) }
+        set { set(newValue, "debugPanel") }
+    }
+
     var syncClipboard: Bool {
         get { bool("syncClipboard", true) }
         set { set(newValue, "syncClipboard") }
@@ -313,7 +327,7 @@ final class SettingsViewController: UITableViewController {
         case .about: return 1
         case .touch: return 3
         case .portrait: return PortraitLayout.allCases.count
-        case .display: return 5
+        case .display: return 7
         case .zoom: return 2
         case .macros: return Macro.all.count + 1
         }
@@ -341,7 +355,7 @@ final class SettingsViewController: UITableViewController {
             case .landscape: return "The app doesn't rotate."
             }
         case .display:
-            return "Quality: lower is smoother, especially on Wi-Fi. Size: Larger text makes the Mac's interface bigger (Extend mode). Changing either restarts the picture for a moment."
+            return "Quality: lower is smoother, especially on Wi-Fi. Size: Larger text makes the Mac's interface bigger (Extend mode). Changing either restarts the picture for a moment. Stay connected in the background keeps the Mac's display up while you use other apps, at some battery cost. Debug panel shows stream statistics under the picture when the iPad is upright in the Game Boy layout."
         case .zoom:
             return "Pinch the picture with two fingers to zoom in on the iPad; double-tap with two fingers to zoom back out. The Mac is unaffected."
         case .touch:
@@ -409,9 +423,17 @@ final class SettingsViewController: UITableViewController {
             return SwitchCell(title: "Status bar (Mac battery, latency, fps)", isOn: settings.showStatusBar) { [weak self] in
                 self?.settings.showStatusBar = $0
             }
-        case (.display, _):
+        case (.display, 4):
             return SwitchCell(title: "Sync clipboard with the Mac", isOn: settings.syncClipboard) { [weak self] in
                 self?.settings.syncClipboard = $0
+            }
+        case (.display, 5):
+            return SwitchCell(title: "Stay connected in the background", isOn: settings.keepAliveInBackground) { [weak self] in
+                self?.settings.keepAliveInBackground = $0
+            }
+        case (.display, _):
+            return SwitchCell(title: "Debug panel (Game Boy layout)", isOn: settings.debugPanel) { [weak self] in
+                self?.settings.debugPanel = $0
             }
         case (.zoom, 0):
             return SwitchCell(title: "Pinch to zoom", isOn: settings.pinchToZoom) { [weak self] in
