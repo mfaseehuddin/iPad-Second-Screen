@@ -362,7 +362,7 @@ final class SettingsViewController: UITableViewController {
         case .trackpad: return "Trackpad"
         case .touch: return "Touch"
         case .macros: return "Macro bar"
-        case .about: return nil
+        case .about: return "About"
         }
     }
 
@@ -382,6 +382,8 @@ final class SettingsViewController: UITableViewController {
             return "Click: tap where you want to click. Trackpad: drag anywhere on the picture to move the pointer, tap to click, two-finger tap to right-click. Auto: Trackpad while the overlay is open with its trackpad switched off, Click otherwise. Off: touches on the picture do nothing (two-finger scroll and pinch still work)."
         case .macros:
             return "Shortcuts shown above the keyboard. ⌃← / ⌃→ switch desktops when Mission Control's shortcuts are enabled on the Mac. Swipe left on your own macros to delete them."
+        case .about:
+            return "Revive by Muhammad Faseeh Ud Din, based on the iOS 12 client by cuongpham1. The Mac side is OpenDisplay by Philip Poloczek (GPL-3.0). Revive is free and open source under the MIT License."
         default:
             return nil
         }
