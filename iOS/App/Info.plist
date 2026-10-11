@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>LegacyPadDisplay</string>
+	<string>Revive</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -25,7 +25,7 @@
 		<string>_opensidecar._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>LegacyPadDisplay listens on the local network / USB so your Mac can send it a video stream.</string>
+	<string>Revive listens on the local network and USB so your Mac can send it its display.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiresFullScreen</key>

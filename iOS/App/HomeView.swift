@@ -44,7 +44,7 @@ final class HomeView: UIView {
         super.init(frame: frame)
         backgroundColor = Palette.background
 
-        titleLabel.text = "Second Screen"
+        titleLabel.text = "Revive"
         titleLabel.font = .systemFont(ofSize: 34, weight: .bold)
         titleLabel.textColor = .white
 

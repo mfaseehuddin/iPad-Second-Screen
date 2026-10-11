@@ -1,4 +1,4 @@
-# Builds OpenDisplay.app (the Mac side) with patches/ applied, ad-hoc signed,
+# Builds OpenDisplay.app (Revive's Mac side) with patches/ applied, ad-hoc signed,
 # on a GitHub macOS runner, so no local Xcode is needed. Download the zip from
 # the run's Artifacts (README, Step 1).
 name: Build Mac app
@@ -51,9 +51,9 @@ jobs:
         run: |
           APP=$(find Mac/build/Build/Products/Release -maxdepth 1 -name '*.app' | head -1)
           echo "Built $APP"
-          ditto -c -k --keepParent "$APP" OpenDisplay-patched.zip
+          ditto -c -k --keepParent "$APP" OpenDisplay-for-Revive.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OpenDisplay-patched-mac
-          path: OpenDisplay-patched.zip
+          name: Revive-Mac
+          path: OpenDisplay-for-Revive.zip

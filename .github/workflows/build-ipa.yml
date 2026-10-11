@@ -1,7 +1,8 @@
-# Builds LegacyPadDisplay.ipa on a GitHub macOS runner, so no local Xcode is
+# Builds the Revive iPad app on a GitHub macOS runner, so no local Xcode is
 # needed: an unsigned IPA for Sideloadly, and a fake-signed one for jailbroken
-# devices with AppSync Unified (README, "Install the iPad app").
-name: Build unsigned IPA
+# devices with AppSync Unified (README, "Install the iPad app"). The Xcode
+# target is still called LegacyPadDisplay; only the app's name changed.
+name: Build iPad app
 
 on:
   workflow_dispatch:
@@ -34,7 +35,7 @@ jobs:
         run: |
           mkdir Payload
           cp -R build/Release-iphoneos/LegacyPadDisplay.app Payload/
-          zip -qry LegacyPadDisplay.ipa Payload
+          zip -qry Revive.ipa Payload
 
       # For jailbroken devices with AppSync Unified: a pseudo-signature
       # (no certificate) that installs without the 7-day expiry.
@@ -42,11 +43,11 @@ jobs:
         run: |
           brew install ldid
           ldid -S Payload/LegacyPadDisplay.app/LegacyPadDisplay
-          zip -qry LegacyPadDisplay-fakesigned.ipa Payload
+          zip -qry Revive-fakesigned.ipa Payload
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LegacyPadDisplay-ipa
+          name: Revive-ipa
           path: |
-            LegacyPadDisplay.ipa
-            LegacyPadDisplay-fakesigned.ipa
+            Revive.ipa
+            Revive-fakesigned.ipa
